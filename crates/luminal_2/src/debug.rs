@@ -5,6 +5,7 @@ use eframe::{
     egui::{Color32, Pos2, Vec2},
 };
 use egglog::Term;
+use itertools::Itertools;
 use luminal::{
     prelude::petgraph::{Directed, Direction, graph::NodeIndex, prelude::StableGraph},
     shape::Expression,
@@ -21,9 +22,14 @@ pub enum NodeShape {
     Square,
 }
 
-type NodeData = (String, egui::Color32, NodeShape);
-type EdgeData = ();
-type DisplayGraph = StableGraph<NodeData, EdgeData>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    TermType,
+    LoopLevel,
+}
+
+type DisplayNode = (String, egui::Color32, NodeShape, Option<usize>);
+type DisplayGraph = StableGraph<DisplayNode, ()>;
 
 pub fn display_graph(
     graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>,
@@ -33,17 +39,14 @@ pub fn display_graph(
     let mut display_graph = DisplayGraph::new();
     let mut map = FxHashMap::default();
     for node in graph.node_indices() {
+        let (r, c, b) = graph.node_weight(node).unwrap().term_to_string();
         map.insert(
             node,
             display_graph.add_node(
                 if let Some((_, color)) = mark_nodes.iter().find(|(i, _)| *i == node) {
-                    (
-                        graph.node_weight(node).unwrap().term_to_string().0,
-                        *color,
-                        graph.node_weight(node).unwrap().term_to_string().2,
-                    )
+                    (r, *color, b, None)
                 } else {
-                    graph.node_weight(node).unwrap().term_to_string()
+                    (r, c, b, None)
                 },
             ),
         );
@@ -51,6 +54,61 @@ pub fn display_graph(
     for edge in graph.edge_indices() {
         let (start, end) = graph.edge_endpoints(edge).unwrap();
         display_graph.add_edge(map[&start], map[&end], ());
+    }
+
+    // derive loop levels
+    let mut seen = display_graph
+        .externals(Direction::Incoming)
+        .chain(graph.externals(Direction::Outgoing))
+        .collect::<FxHashSet<_>>();
+    let mut dfs = seen
+        .iter()
+        .flat_map(|n| display_graph.neighbors_directed(*n, Direction::Incoming))
+        .collect_vec();
+    while let Some(n) = dfs.pop() {
+        if seen.contains(&n) {
+            continue;
+        }
+        seen.insert(n);
+        let curr_term = display_graph[n].0.clone();
+        if let Some(outgoing_neighbor) = display_graph
+            .neighbors_directed(n, Direction::Outgoing)
+            .find(|n| seen.contains(n))
+        {
+            // Base level off outgoing neighbor
+            let (neighbor_weight, _, _, mut neighbor_levels) =
+                display_graph[outgoing_neighbor].clone();
+            if neighbor_weight.contains("LoopOut") {
+                neighbor_levels = Some(neighbor_levels.unwrap_or_default() + 1);
+            }
+            if curr_term.contains("LoopIn") {
+                neighbor_levels = neighbor_levels.map(|i| i - 1);
+            }
+            display_graph.node_weight_mut(n).unwrap().3 = neighbor_levels;
+        } else if let Some(incoming_neighbor) = display_graph
+            .neighbors_directed(n, Direction::Incoming)
+            .find(|n| seen.contains(n))
+        {
+            // Base level off incoming neighbor
+            let (neighbor_weight, _, _, mut neighbor_levels) =
+                display_graph[incoming_neighbor].clone();
+            if neighbor_weight.contains("LoopIn") {
+                neighbor_levels = Some(neighbor_levels.unwrap_or_default() + 1);
+            }
+            if curr_term.contains("LoopOut") {
+                neighbor_levels = neighbor_levels.map(|i| i - 1);
+            }
+            display_graph.node_weight_mut(n).unwrap().3 = neighbor_levels;
+        } else {
+            panic!("No seen neighbors when building loop levels!");
+        }
+        dfs.extend(display_graph.neighbors_undirected(n));
+    }
+    // remove loop levels for non loopins and loopouts
+    for (w, _, _, l) in display_graph.node_weights_mut() {
+        if !w.contains("LoopIn") && !w.contains("LoopOut") {
+            *l = None;
+        }
     }
 
     eframe::run_native(
@@ -76,6 +134,7 @@ struct Debugger {
 struct Camera {
     zoom: f32, // scale
     pan: Vec2, // screen px offset
+    display_mode: DisplayMode,
 }
 
 impl Camera {
@@ -83,6 +142,7 @@ impl Camera {
         Self {
             zoom: 1.0,
             pan: Vec2::ZERO,
+            display_mode: DisplayMode::TermType,
         }
     }
 
@@ -111,6 +171,13 @@ impl Camera {
         let extra = (usable - mapped_size).max(Vec2::ZERO) * 0.5;
         self.pan = ((mapped_min + extra) - world_min.to_vec2() * self.zoom).to_vec2();
     }
+    #[inline]
+    fn toggle_mode(&mut self) {
+        self.display_mode = match self.display_mode {
+            DisplayMode::TermType => DisplayMode::LoopLevel,
+            DisplayMode::LoopLevel => DisplayMode::TermType,
+        };
+    }
 }
 
 impl Debugger {
@@ -127,11 +194,22 @@ impl Debugger {
 
 impl eframe::App for Debugger {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // global key handling
+        if ctx.input(|i| i.key_pressed(egui::Key::D)) {
+            self.cam.toggle_mode();
+            ctx.request_repaint();
+        }
+
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Drag nodes. Drag background / two-finger scroll to pan. ⌘/Ctrl+wheel or pinch to zoom.");
+                ui.label("Drag nodes. Drag background / two-finger scroll to pan. ⌘/Ctrl+wheel or pinch to zoom. Press 'D' to toggle display.");
                 if ui.button("Fit").clicked() { self.need_fit = true; }
                 ui.label(format!("Zoom: {:.1}x", self.cam.zoom));
+                ui.separator();
+                ui.label(match self.cam.display_mode {
+                    DisplayMode::TermType => "Mode: TermType",
+                    DisplayMode::LoopLevel => "Mode: LoopLevel",
+                });
             });
         });
 
@@ -208,7 +286,6 @@ impl eframe::App for Debugger {
             let node_r = (14.0 * z).clamp(6.0, 40.0);
             let label_dy = 22.0 * z;
             let font_px = (14.0 * z).clamp(9.0, 48.0);
-            let node_stroke = (1.0 * z).clamp(0.5, 3.0);
 
             // edges
             for e in self.g.edge_indices() {
@@ -222,8 +299,8 @@ impl eframe::App for Debugger {
             let font_id = egui::FontId::proportional(font_px);
             for n in self.g.node_indices() {
                 let p = self.cam.w2s(origin, self.pos[n.index()]);
-                let (label, color, shape) = &self.g[n];
-                draw_node(&painter, p, *color, *shape, node_r, node_stroke);
+                let (label, _, _, _) = &self.g[n];
+                draw_node(&painter, p, node_r, &self.g[n], self.cam.display_mode);
                 painter.text(
                     p + Vec2::new(0.0, -label_dy),
                     egui::Align2::CENTER_CENTER,
@@ -237,34 +314,48 @@ impl eframe::App for Debugger {
 }
 
 // Small helper to draw nodes
-fn draw_node(p: &egui::Painter, c: Pos2, color: Color32, shape: NodeShape, r: f32, stroke_w: f32) {
+fn draw_node(
+    p: &egui::Painter,
+    c: Pos2,
+    r: f32,
+    (_, color, shape, loop_level): &DisplayNode,
+    display_mode: DisplayMode,
+) {
+    let color = if display_mode == DisplayMode::LoopLevel
+        && let Some(loop_level) = loop_level
+    {
+        rainbow_color(*loop_level)
+    } else {
+        *color
+    };
     match shape {
         NodeShape::Circle => {
             p.circle_filled(c, r, color);
-            p.circle_stroke(c, r, egui::Stroke::new(stroke_w, Color32::BLACK));
         }
         NodeShape::Triangle => {
-            let mut pts = [Pos2::ZERO; 3];
-            for i in 0..3 {
-                let ang = TAU * (i as f32) / 3.0 - FRAC_PI_2; // up
-                pts[i] = Pos2::new(c.x + r * ang.cos(), c.y + r * ang.sin());
-            }
+            let pts: Vec<_> = (0..3)
+                .map(|i| {
+                    let ang = TAU * (i as f32) / 3.0 - FRAC_PI_2; // up
+                    Pos2::new(c.x + r * ang.cos(), c.y + r * ang.sin())
+                })
+                .collect();
             p.add(egui::epaint::Shape::convex_polygon(
-                pts.to_vec(),
+                pts.clone(),
                 color,
-                egui::Stroke::new(1.0, color),
+                egui::Stroke::NONE,
             ));
         }
         NodeShape::InvertedTriangle => {
-            let mut pts = [Pos2::ZERO; 3];
-            for i in 0..3 {
-                let ang = TAU * (i as f32) / 3.0 + FRAC_PI_2; // down
-                pts[i] = Pos2::new(c.x + r * ang.cos(), c.y + r * ang.sin());
-            }
+            let pts: Vec<_> = (0..3)
+                .map(|i| {
+                    let ang = TAU * (i as f32) / 3.0 + FRAC_PI_2; // down
+                    Pos2::new(c.x + r * ang.cos(), c.y + r * ang.sin())
+                })
+                .collect();
             p.add(egui::epaint::Shape::convex_polygon(
-                pts.to_vec(),
+                pts.clone(),
                 color,
-                egui::Stroke::new(1.0, color),
+                egui::Stroke::NONE,
             ));
         }
         NodeShape::Square => {
@@ -275,12 +366,40 @@ fn draw_node(p: &egui::Painter, c: Pos2, color: Color32, shape: NodeShape, r: f3
                 Pos2::new(c.x - r, c.y + r),
             ];
             p.add(egui::epaint::Shape::convex_polygon(
-                pts,
+                pts.clone(),
                 color,
-                egui::Stroke::new(1.0, Color32::BLACK),
+                egui::Stroke::NONE,
             ));
         }
     }
+}
+
+fn rainbow_color(i: usize) -> egui::Color32 {
+    // Map 0..=10 across 0..=360 degrees
+    let hue = (9.0 - i as f32) / 10.0 * 360.0;
+    hsv_to_rgb(hue, 1.0, 1.0)
+}
+
+// Simple HSV → Color32
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> egui::Color32 {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+
+    let (r, g, b) = match h as i32 {
+        0..=59 => (c, x, 0.0),
+        60..=119 => (x, c, 0.0),
+        120..=179 => (0.0, c, x),
+        180..=239 => (0.0, x, c),
+        240..=299 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    egui::Color32::from_rgb(
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    )
 }
 
 fn world_bounds(
