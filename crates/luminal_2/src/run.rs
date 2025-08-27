@@ -5,7 +5,6 @@ use crate::{
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
     translate::{InitData, OptimalGraphNodeIndex, SubGraphNodeIndex, translate_graph},
-    utils::build_search_space,
 };
 use itertools::Itertools;
 use luminal::{
@@ -44,10 +43,10 @@ pub fn chunk_based_search_compiler(
         for graph_node in meta_graph.node_indices().collect_vec() {
             let sub_graph = meta_graph.node_weight_mut(graph_node).unwrap();
             // luminal_2::utils::display_graph(&graph, &[]);
-            let equality_saturated_egraph = build_search_space(sub_graph, 7);
             let inputs = make_test_inputs(sub_graph, &original_graph.dyn_map, inits);
             let best_searched_graph = search(
-                &equality_saturated_egraph,
+                &sub_graph,
+                7,
                 &inputs,
                 GPUArch::Metal(HashMap::default()),
                 &original_graph.dyn_map,

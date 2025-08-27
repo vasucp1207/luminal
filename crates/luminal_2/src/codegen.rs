@@ -1,3 +1,4 @@
+use egui::Color32;
 use itertools::Itertools;
 use luminal::{
     prelude::{
@@ -14,8 +15,9 @@ use std::{
 
 use crate::{
     GMEMBuffer, GPUArch, GraphTerm, Kernel,
+    debug::display_graph,
     translate::{MetaGraph, SubGraph},
-    utils::{display_graph, validate_graph},
+    utils::validate_graph,
 };
 
 pub const GRID_DIMS: usize = 2;
@@ -1067,7 +1069,7 @@ fn split_kernels(
             }
             if matches!(curr_term, GraphTerm::LoopIn { .. }) {
                 if neighbor_levels.is_empty() {
-                    display_graph(&marked_graph, &[(outputs[0], "yellow")]);
+                    display_graph(&marked_graph, &[(outputs[0], Color32::YELLOW)]);
                 }
                 neighbor_levels.pop().unwrap();
             }
@@ -1086,7 +1088,7 @@ fn split_kernels(
             }
             marked_graph.node_weight_mut(n).unwrap().1 = neighbor_levels;
         } else {
-            display_graph(&marked_graph, &[(n, "yellow")]);
+            display_graph(&marked_graph, &[(n, Color32::YELLOW)]);
             panic!("No seen neighbors when building loop levels!");
         }
         dfs.extend(marked_graph.neighbors_undirected(n));

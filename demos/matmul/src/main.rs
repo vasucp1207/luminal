@@ -7,10 +7,10 @@ use luminal::prelude::{
 };
 use luminal_2::{
     codegen::{codegen, stitch_meta_graph_together},
+    debug::display_graph,
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
-    utils::build_search_space,
     Buffer, Device, GPUArch, GraphTerm,
 };
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
@@ -28,10 +28,11 @@ fn main() {
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            let search_space = build_search_space(graph, 3);
+            display_graph(&graph, &[]);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
             let searched_graph = search(
-                &search_space,
+                graph,
+                3,
                 &inputs,
                 GPUArch::Metal(HashMap::default()),
                 &cx.dyn_map,

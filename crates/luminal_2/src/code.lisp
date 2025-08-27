@@ -46,7 +46,7 @@
 ;(rewrite (MDiv ?a ?a) (MNum 1) :ruleset expr) ; why does this cause kernels to incorrectly oversimplify?
 ;(rewrite (MDiv (MMul ?x ?y) ?y) ?x :ruleset expr) ; and this?
 (rewrite (MMod (MMul ?x ?y) ?y) (MNum 0) :ruleset expr)
-(rewrite (MDiv (MMul ?x ?y) ?z) (MMul ?x (MDiv ?y ?z)) :ruleset expr)
+;(rewrite (MDiv (MMul ?x ?y) ?z) (MMul ?x (MDiv ?y ?z)) :ruleset expr)
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?y)) :when ((>= ?z ?y) (= 0 (% ?y ?z))) :ruleset expr) ; nested mods
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?z)) :when ((>= ?y ?z) (= 0 (% ?z ?y))) :ruleset expr)
 
@@ -280,7 +280,7 @@
 		(Loop (+ ?o ?i) (MMul ?rangeO ?rangeI))
 		(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") ?rangeI)) (MReplace ?stI (MVar "z") (MMod (MVar "z") ?rangeI)))
 	)
-	;:ruleset ir
+	:ruleset ir
 	:when ((!= ?stI (MAccum "a")) (!= ?stO (MAccum "a")))
 )
 (rewrite
@@ -545,3 +545,9 @@
 	(run ir-generic)
 	(repeat 3 tc)
 )
+
+;(let a (LoopOut (LoopOut (LoopOut (LoopOut (LoopOut (LoopOut (Add (LoopIn (LoopIn (LoopIn (LoopIn (LoopIn (LoopIn (LoopOut (Mul (LoopIn (GMEM "B Load") (Loop "" (MNum 134217728)) (MAdd (MMul (MNum 512) (MMod (MDiv (MVar "z") (MNum 512)) (MNum 512))) (MDiv (MDiv (MVar "z") (MNum 512)) (MNum 512)))) (LoopIn (GMEM "A Load") (Loop "" (MNum 134217728)) (MAdd (MMod (MDiv (MVar "z") (MNum 512)) (MNum 512)) (MMul (MMod (MVar "z") (MNum 512)) (MNum 512))))) (Loop "" (MNum 134217728)) (MAdd (MMul (MMod (MVar "z") (MNum 512)) (MNum 262144)) (MDiv (MVar "z") (MNum 512)))) (Loop "" (MNum 512)) (MMul (MVar "z") (MNum 262144))) (Loop "" (MNum 512)) (MMul (MNum 512) (MVar "z"))) (Loop "" (MNum 1)) (MNum 0)) (Loop "" (MNum 1)) (MNum 0)) (Loop "" (MNum 512)) (MVar "z")) (Loop "" (MNum 1)) (MNum 0)) (LoopIn (LoopIn (LoopIn (LoopIn (LoopIn (LoopIn (GMEM "acc_0") (Loop "" (MNum 512)) (MNum 0)) (Loop "" (MNum 512)) (MNum 0)) (Loop "" (MNum 1)) (MNum 0)) (Loop "" (MNum 1)) (MNum 0)) (Loop "" (MNum 512)) (MAccum "a")) (Loop "" (MNum 1)) (MNum 0))) (Loop "" (MNum 1)) (MNum 0)) (Loop "" (MNum 512)) (MAccum "a")) (Loop "" (MNum 1)) (MVar "z")) (Loop "" (MNum 1)) (MVar "z")) (Loop "" (MNum 512)) (MVar "z")) (Loop "" (MNum 512)) (MMul (MNum 512) (MVar "z"))))
+;(ruleset loop-blank)
+;(rewrite (Loop ?s ?r) (Loop "" ?r) :ruleset loop-blank)
+;(run-schedule (run loop-blank))
+;(check (= t28 a))

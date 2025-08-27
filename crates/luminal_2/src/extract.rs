@@ -6,7 +6,7 @@ use std::usize;
 
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
-use crate::utils::{display_graph, print_kernels, render_egglog};
+use crate::utils::{build_search_space, generate_proof, print_kernels};
 use crate::{Buffer, Device, Kernel};
 use crate::{GPUArch, GraphTerm};
 use colored::Colorize;
@@ -246,13 +246,16 @@ fn extract_trajectories<'a>(
 }
 
 pub fn search(
-    egraph: &EGraph,
+    graph: &StableGraph<GraphTerm, ()>,
+    steps: usize,
     inputs: &[(String, InitData)],
     arch: GPUArch,
     dyn_vars: &FxHashMap<char, usize>,
 ) -> Option<StableGraph<GraphTerm, ()>> {
+    let og = graph.clone();
+    let egraph = build_search_space(graph, steps);
     let trajectories = extract_trajectories(
-        egraph,
+        &egraph,
         &egraph.root_eclasses[0],
         &mut FxHashMap::default(),
         &mut FxHashSet::default(),
@@ -269,6 +272,7 @@ pub fn search(
     let total_trajectories = trajectories.len().min(MAX_SEARCHED_GRAPHS);
     let mut prev_graphs = vec![];
     let mut prev_traj = vec![];
+    let mut og_kernels = "".to_string();
     let mut ui_functions = None;
     if option_env!("DEBUG").is_none() {
         ui_functions = Some(crate::utils::search_ui());
@@ -280,7 +284,7 @@ pub fn search(
         .enumerate()
     {
         // Build termdag
-        let mut graph = extraction_to_graph(egraph, &trajectory);
+        let mut graph = extraction_to_graph(&egraph, &trajectory);
         prev_graphs.push(graph.clone());
         prev_traj.push(trajectory.clone());
 
@@ -375,8 +379,11 @@ pub fn search(
                                                     .map(|v| &v[..v.len().min(20)])
                                                     .collect_vec()
                                             );
-                                            crate::utils::display_graph(&graph, &[]);
-                                            println!("{}", render_egglog(&graph, "a").0);
+                                            crate::debug::display_graph(&og, &[]);
+                                            crate::debug::display_graph(&graph, &[]);
+                                            generate_proof(&og, &graph);
+                                            println!("{}", og_kernels);
+                                            println!("{}", print_kernels(&kernels));
                                             panic!(
                                                 "{} {x} != {y}",
                                                 "Output Mismatch".bold().on_bright_red()
@@ -390,6 +397,9 @@ pub fn search(
                         }
                     }
                     let kernel_string = print_kernels(&kernels);
+                    if og_kernels.is_empty() {
+                        og_kernels = kernel_string.clone();
+                    }
                     // if kernel_string.len() < fastest.len() || fastest.is_empty() {
 
                     // }

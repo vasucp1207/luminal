@@ -1,4 +1,5 @@
 pub mod codegen;
+pub mod debug;
 pub mod extract;
 pub mod run;
 pub mod translate;
