@@ -13,6 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{GraphTerm, Kernel};
 
+#[derive(Debug, Clone, Copy)]
 pub enum NodeShape {
     Circle,
     Triangle,
@@ -67,21 +68,59 @@ struct Debugger {
     g: DisplayGraph,
     pos: Vec<Pos2>,
     dragging: Option<usize>,
-    zoom: f32,    // scale factor
-    pan: Vec2,    // screen-space pan in px, relative to panel origin
-    fitted: bool, // compute Fit once (or when "Fit" pressed)
+    cam: Camera,
+    need_fit: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Camera {
+    zoom: f32, // scale
+    pan: Vec2, // screen px offset
+}
+
+impl Camera {
+    fn new() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+        }
+    }
+
+    #[inline]
+    fn w2s(&self, origin: Pos2, w: Pos2) -> Pos2 {
+        origin + (self.pan + w.to_vec2() * self.zoom)
+    }
+    #[inline]
+    fn s2w(&self, origin: Pos2, s: Pos2) -> Pos2 {
+        (((s - origin) - self.pan) / self.zoom).to_pos2()
+    }
+    fn zoom_at(&mut self, origin: Pos2, cursor: Pos2, factor: f32) {
+        let world_before = self.s2w(origin, cursor);
+        let new_zoom = (self.zoom * factor).clamp(0.1, 10.0);
+        self.pan = (cursor - origin) - world_before.to_vec2() * new_zoom;
+        self.zoom = new_zoom;
+    }
+    fn fit(&mut self, origin: Pos2, viewport: Vec2, world_min: Pos2, world_max: Pos2, margin: f32) {
+        let size_w = (world_max - world_min).max(Vec2::splat(1.0));
+        let usable = (viewport - Vec2::splat(2.0 * margin)).max(Vec2::splat(1.0));
+        self.zoom = (usable.x / size_w.x)
+            .min(usable.y / size_w.y)
+            .clamp(0.1, 10.0);
+        let mapped_min = origin + Vec2::splat(margin);
+        let mapped_size = size_w * self.zoom;
+        let extra = (usable - mapped_size).max(Vec2::ZERO) * 0.5;
+        self.pan = ((mapped_min + extra) - world_min.to_vec2() * self.zoom).to_vec2();
+    }
 }
 
 impl Debugger {
     fn new(g: DisplayGraph) -> Self {
-        let pos = layered_layout(&g, 140.0, 120.0, 100.0);
         Self {
+            pos: layered_layout(&g, 140.0, 120.0, 100.0),
             g,
-            pos,
             dragging: None,
-            zoom: 1.0,
-            pan: Vec2::ZERO,
-            fitted: false, // first frame will Fit to view
+            cam: Camera::new(),
+            need_fit: true,
         }
     }
 }
@@ -90,198 +129,157 @@ impl eframe::App for Debugger {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Drag nodes. Drag empty space (or two-finger scroll) to pan. ⌘/Ctrl + scroll (or pinch) to zoom.");
-                if ui.button("Fit").clicked() {
-                    self.fitted = false; // recompute next frame
-                }
-                ui.label(format!("Zoom: {:.1}x", self.zoom));
+                ui.label("Drag nodes. Drag background / two-finger scroll to pan. ⌘/Ctrl+wheel or pinch to zoom.");
+                if ui.button("Fit").clicked() { self.need_fit = true; }
+                ui.label(format!("Zoom: {:.1}x", self.cam.zoom));
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Allocate a stable drawing surface equal to the visible area.
-            let viewport_px = ui.available_size();
-            let (resp, painter) = ui.allocate_painter(viewport_px, egui::Sense::click_and_drag());
-
-            // Helper transforms: screen = origin + pan + world*zoom
+            // Stable viewport-sized painter
+            let viewport = ui.available_size();
+            let (resp, painter) = ui.allocate_painter(viewport, egui::Sense::click_and_drag());
             let origin = resp.rect.min;
-            let w2s = |w: Pos2, zoom: f32, pan: Vec2| (origin + (pan + w.to_vec2() * zoom));
-            let s2w = |s: Pos2, zoom: f32, pan: Vec2| (((s - origin) - pan) / zoom).to_pos2();
 
-            // Compute a Fit transform once (or after pressing Fit).
-            let margin = 40.0;
-            let font_id = egui::FontId::proportional(14.0);
-            let (min_w, max_w) = world_bounds(ui, &self.g, &self.pos, &font_id);
-            if !self.fitted && min_w.x.is_finite() {
-                // world size
-                let size_w = Vec2::new((max_w.x - min_w.x).max(1.0), (max_w.y - min_w.y).max(1.0));
-                // usable viewport (minus margins)
-                let usable = Vec2::new(
-                    (viewport_px.x - 2.0 * margin).max(1.0),
-                    (viewport_px.y - 2.0 * margin).max(1.0),
-                );
-                // fit & center
-                self.zoom = (usable.x / size_w.x)
-                    .min(usable.y / size_w.y)
-                    .clamp(0.1, 10.0);
-                // map world min to margin, then center if there is spare space
-                let mapped_min = origin + Vec2::splat(margin);
-                let mapped_size = size_w * self.zoom;
-                let extra = Vec2::new(
-                    ((viewport_px.x - 2.0 * margin) - mapped_size.x).max(0.0) * 0.5,
-                    ((viewport_px.y - 2.0 * margin) - mapped_size.y).max(0.0) * 0.5,
-                );
-                // Solve pan so that world min -> margin+extra
-                self.pan = ((mapped_min + extra) - min_w.to_vec2() * self.zoom).to_vec2();
-                self.fitted = true;
+            // Fit once (or after button)
+            if self.need_fit {
+                let (min_w, max_w) =
+                    world_bounds(ui, &self.g, &self.pos, &egui::FontId::proportional(14.0));
+                if min_w.x.is_finite() {
+                    self.cam.fit(origin, viewport, min_w, max_w, 40.0);
+                }
+                self.need_fit = false;
             }
 
-            // Input: zoom (pinch or ⌘/Ctrl + wheel), pan (scroll/drag)
-            let (mods, raw_scroll, pinch2d, pointer, pointer_delta) = ui.input(|i| {
+            // --- Input handling ---
+            let (mods, raw_scroll, pinch, pointer, drag_delta) = ui.input(|i| {
                 (
                     i.modifiers,
-                    i.raw_scroll_delta, // trackpad/mouse two-finger scroll
-                    i.zoom_delta_2d(),  // pinch zoom
+                    i.raw_scroll_delta,
+                    i.zoom_delta_2d(),
                     i.pointer.clone(),
-                    i.pointer.delta(), // drag delta this frame
+                    i.pointer.delta(),
                 )
             });
 
-            // Zoom around cursor (pinch or Ctrl/Cmd + wheel)
-            let pinch_y = pinch2d.y;
-            let has_pinch = (pinch_y - 1.0).abs() > 1e-3;
-            let want_wheel_zoom = (mods.command || mods.ctrl) && raw_scroll.y != 0.0;
-
-            if (has_pinch || want_wheel_zoom) {
-                if let Some(cursor) = pointer.hover_pos().or_else(|| Some(resp.rect.center())) {
-                    let world_before = s2w(cursor, self.zoom, self.pan);
-                    let factor = if has_pinch {
-                        pinch_y
-                    } else {
-                        (raw_scroll.y * -0.001).exp()
-                    };
-                    let new_zoom = (self.zoom * factor).clamp(0.1, 10.0);
-                    // Keep world_before under the cursor: cursor = origin + pan' + world_before*new_zoom
-                    self.pan = (cursor - origin) - world_before.to_vec2() * new_zoom;
-                    self.zoom = new_zoom;
-                    ui.ctx().request_repaint();
-                }
-            } else {
-                // No modifier: wheel/trackpad pans
-                if raw_scroll != Vec2::ZERO {
-                    self.pan += raw_scroll; // natural scrolling; flip if desired
-                }
+            // Zoom (pinch or Cmd/Ctrl + wheel), anchored at cursor (fallback to center)
+            let do_pinch = (pinch.y - 1.0).abs() > 1e-3;
+            let do_wheel_zoom = (mods.command || mods.ctrl) && raw_scroll.y != 0.0;
+            if do_pinch || do_wheel_zoom {
+                let cursor = pointer.hover_pos().unwrap_or(resp.rect.center());
+                let factor = if do_pinch {
+                    pinch.y
+                } else {
+                    (raw_scroll.y * -0.001).exp()
+                };
+                self.cam.zoom_at(origin, cursor, factor);
+                ui.ctx().request_repaint();
+            } else if raw_scroll != Vec2::ZERO {
+                // Trackpad scroll pans when not zooming
+                self.cam.pan += raw_scroll;
             }
 
-            // Picking & dragging nodes (in screen space for UX)
-            // If mouse down starts on a node -> drag node; else dragging background pans.
+            // Node picking/dragging or background pan drag
             if let Some(pos) = pointer.interact_pos() {
                 if pointer.primary_pressed() && self.dragging.is_none() {
-                    // pick nearest within radius
-                    let pick_r = 16.0;
-                    let mut pick: Option<(usize, f32)> = None;
-                    for (i, wp) in self.pos.iter().enumerate() {
-                        let sp = w2s(*wp, self.zoom, self.pan);
-                        let d2 = sp.distance_sq(pos);
-                        if d2 <= pick_r * pick_r && pick.map_or(true, |(_, best)| d2 < best) {
-                            pick = Some((i, d2));
-                        }
-                    }
-                    self.dragging = pick.map(|(i, _)| i);
+                    let pick_r2 = 16.0 * 16.0;
+                    self.dragging = self
+                        .pos
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &w)| (i, self.cam.w2s(origin, w).distance_sq(pos)))
+                        .filter(|&(_, d2)| d2 <= pick_r2)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(i, _)| i);
                 }
-
                 if pointer.primary_down() {
                     if let Some(i) = self.dragging {
-                        let world = s2w(pos, self.zoom, self.pan);
-                        self.pos[i] = world;
+                        self.pos[i] = self.cam.s2w(origin, pos);
                     } else {
-                        // background drag pans
-                        self.pan += pointer_delta;
+                        self.cam.pan += drag_delta;
                     }
                 } else if pointer.primary_released() {
                     self.dragging = None;
                 }
             }
 
-            // Draw
-            let z = self.zoom;
+            // --- Drawing ---
+            let z = self.cam.zoom;
             let node_r = (14.0 * z).clamp(6.0, 40.0);
             let label_dy = 22.0 * z;
             let font_px = (14.0 * z).clamp(9.0, 48.0);
-            let node_stroke_w = (1.0 * z).clamp(0.5, 3.0);
-            let font_id_z = egui::FontId::proportional(font_px);
+            let node_stroke = (1.0 * z).clamp(0.5, 3.0);
 
             // edges
             for e in self.g.edge_indices() {
                 let (u, v) = self.g.edge_endpoints(e).unwrap();
-                let pu = w2s(self.pos[u.index()], z, self.pan);
-                let pv = w2s(self.pos[v.index()], z, self.pan);
+                let pu = self.cam.w2s(origin, self.pos[u.index()]);
+                let pv = self.cam.w2s(origin, self.pos[v.index()]);
                 draw_arrow(&painter, pu, pv, z, Color32::DARK_GRAY);
             }
 
             // nodes + labels
+            let font_id = egui::FontId::proportional(font_px);
             for n in self.g.node_indices() {
-                let p = w2s(self.pos[n.index()], z, self.pan);
+                let p = self.cam.w2s(origin, self.pos[n.index()]);
                 let (label, color, shape) = &self.g[n];
-
-                match shape {
-                    NodeShape::Circle => {
-                        painter.circle_filled(p, node_r, *color);
-                        painter.circle_stroke(
-                            p,
-                            node_r,
-                            egui::Stroke::new(node_stroke_w, Color32::BLACK),
-                        );
-                    }
-                    NodeShape::InvertedTriangle => {
-                        let offset = FRAC_PI_2; // points down
-                        let mut pts = [Pos2::ZERO; 3];
-                        for i in 0..3 {
-                            let ang = TAU * (i as f32) / 3.0 + offset;
-                            pts[i] = Pos2::new(p.x + node_r * ang.cos(), p.y + node_r * ang.sin());
-                        }
-                        painter.add(egui::epaint::Shape::convex_polygon(
-                            pts.to_vec(),
-                            *color,
-                            egui::Stroke::new(1.0, *color),
-                        ));
-                    }
-                    NodeShape::Triangle => {
-                        let mut pts = [Pos2::ZERO; 3];
-                        for i in 0..3 {
-                            let ang = TAU * (i as f32) / 3.0 - FRAC_PI_2; // up
-                            pts[i] = Pos2::new(p.x + node_r * ang.cos(), p.y + node_r * ang.sin());
-                        }
-                        painter.add(egui::epaint::Shape::convex_polygon(
-                            pts.to_vec(),
-                            *color,
-                            egui::Stroke::new(1.0, *color),
-                        ));
-                    }
-                    NodeShape::Square => {
-                        let pts = vec![
-                            Pos2::new(p.x - node_r, p.y - node_r),
-                            Pos2::new(p.x + node_r, p.y - node_r),
-                            Pos2::new(p.x + node_r, p.y + node_r),
-                            Pos2::new(p.x - node_r, p.y + node_r),
-                        ];
-                        painter.add(egui::epaint::Shape::convex_polygon(
-                            pts,
-                            *color,
-                            egui::Stroke::new(1.0, Color32::BLACK),
-                        ));
-                    }
-                }
-
+                draw_node(&painter, p, *color, *shape, node_r, node_stroke);
                 painter.text(
                     p + Vec2::new(0.0, -label_dy),
                     egui::Align2::CENTER_CENTER,
                     label,
-                    font_id_z.clone(),
+                    font_id.clone(),
                     Color32::WHITE,
                 );
             }
         });
+    }
+}
+
+// Small helper to draw nodes
+fn draw_node(p: &egui::Painter, c: Pos2, color: Color32, shape: NodeShape, r: f32, stroke_w: f32) {
+    match shape {
+        NodeShape::Circle => {
+            p.circle_filled(c, r, color);
+            p.circle_stroke(c, r, egui::Stroke::new(stroke_w, Color32::BLACK));
+        }
+        NodeShape::Triangle => {
+            let mut pts = [Pos2::ZERO; 3];
+            for i in 0..3 {
+                let ang = TAU * (i as f32) / 3.0 - FRAC_PI_2; // up
+                pts[i] = Pos2::new(c.x + r * ang.cos(), c.y + r * ang.sin());
+            }
+            p.add(egui::epaint::Shape::convex_polygon(
+                pts.to_vec(),
+                color,
+                egui::Stroke::new(1.0, color),
+            ));
+        }
+        NodeShape::InvertedTriangle => {
+            let mut pts = [Pos2::ZERO; 3];
+            for i in 0..3 {
+                let ang = TAU * (i as f32) / 3.0 + FRAC_PI_2; // down
+                pts[i] = Pos2::new(c.x + r * ang.cos(), c.y + r * ang.sin());
+            }
+            p.add(egui::epaint::Shape::convex_polygon(
+                pts.to_vec(),
+                color,
+                egui::Stroke::new(1.0, color),
+            ));
+        }
+        NodeShape::Square => {
+            let pts = vec![
+                Pos2::new(c.x - r, c.y - r),
+                Pos2::new(c.x + r, c.y - r),
+                Pos2::new(c.x + r, c.y + r),
+                Pos2::new(c.x - r, c.y + r),
+            ];
+            p.add(egui::epaint::Shape::convex_polygon(
+                pts,
+                color,
+                egui::Stroke::new(1.0, Color32::BLACK),
+            ));
+        }
     }
 }
 
