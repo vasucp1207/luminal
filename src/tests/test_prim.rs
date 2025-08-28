@@ -14,6 +14,7 @@ fn test_reshape() {
     let d_dev = Cpu::default();
     let d_a = d_dev.tensor([[1., 2., 3.], [1., 2., 3.]]);
     let d_b: dfdx::tensor::Tensor<Rank1<6>, f32, Cpu> = d_a.reshape();
+    println!("{:?}", d_b);
 
     assert_close(&b.data(), &d_b.as_vec());
 }

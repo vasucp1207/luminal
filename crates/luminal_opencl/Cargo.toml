@@ -1,0 +1,14 @@
+[package]
+name = "luminal_opencl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+itertools = "0.12.1"
+luminal = { path = "../.." }
+ocl = "0.19"
+
+[dev-dependencies]
+dfdx = { version = "0.13", features = ["f16"] }
+rand = "0.8.5"
+luminal_nn = { path = "../../crates/luminal_nn" }
