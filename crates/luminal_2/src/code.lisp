@@ -30,7 +30,7 @@
 ; Constant folding
 (rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
-;(rewrite (MMul (MNum ?a) (MNum ?b)) (MNum (* ?a ?b)) :when ((< ?a 10000) (< ?b 10000)) :ruleset expr)
+(rewrite (MMul (MNum ?a) (MNum ?b)) (MNum (* ?a ?b)) :when ((< ?a 10000) (< ?b 10000)) :ruleset expr)
 (rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MMax (MNum a) (MNum b)) (MNum (max a b)) :ruleset expr)
 (rewrite (MMin (MNum a) (MNum b)) (MNum (min a b)) :ruleset expr)
