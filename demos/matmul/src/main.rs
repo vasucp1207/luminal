@@ -19,16 +19,20 @@ use rustc_hash::FxHashMap;
 fn main() {
     objc2::rc::autoreleasepool(|_| {
         #[allow(non_snake_case)]
-        let (M, K, N) = (512, 512, 512);
+        let (M, K, N) = (512, 128, 512);
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
-        let out = a.matmul(b);
+        // let out = a.matmul(b);
+        let (m, _) = a.dims2();
+        let (_, n) = b.dims2();
+        // Broadcasted Multiply
+        let out = a.expand_dim(1, n) * b.permute((1, 0)).expand_dim(0, m);
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            display_graph(&graph, &[]);
+            // display_graph(graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
             let searched_graph = search(
                 graph,

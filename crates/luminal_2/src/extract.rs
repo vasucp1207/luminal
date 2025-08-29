@@ -42,6 +42,9 @@ const INVALID_IR: &[&str] = &[
 type Cost = u128; // Execution time in microseconds
 
 fn is_expression_enode(enode_label: &str) -> bool {
+    // if matches!(enode_label, "MergeLoops") {
+    //     panic!()
+    // }
     matches!(
         enode_label,
         "MNum"
@@ -177,17 +180,17 @@ fn extract_trajectories<'a>(
                     )
                     .map(|i| vec![i])
                     .unwrap_or_default()
-                } else if egraph.nodes[child].op == "Loop" {
-                    // Pull just the range out for the loop
-                    extract_shortest(
-                        egraph,
-                        egraph.nid_to_cid(&egraph.nodes[child].children[1]),
-                        seen,
-                        junk_cache,
-                        &mut FxHashMap::default(),
-                    )
-                    .map(|i| vec![i])
-                    .unwrap_or_default()
+                // } else if egraph.nodes[child].op == "Loop" {
+                //     // Pull just the range out for the loop
+                //     extract_shortest(
+                //         egraph,
+                //         egraph.nid_to_cid(&egraph.nodes[child].children[1]),
+                //         seen,
+                //         junk_cache,
+                //         &mut FxHashMap::default(),
+                //     )
+                //     .map(|i| vec![i])
+                //     .unwrap_or_default()
                 } else {
                     extract_trajectories(
                         egraph,
@@ -379,11 +382,10 @@ pub fn search(
                                                     .map(|v| &v[..v.len().min(20)])
                                                     .collect_vec()
                                             );
-                                            crate::debug::display_graph(&og, &[]);
-                                            crate::debug::display_graph(&graph, &[]);
                                             generate_proof(&og, &graph);
                                             println!("{}", og_kernels);
                                             println!("{}", print_kernels(&kernels));
+                                            crate::debug::display_multiple_graphs(&[&og, &graph]);
                                             panic!(
                                                 "{} {x} != {y}",
                                                 "Output Mismatch".bold().on_bright_red()
@@ -429,7 +431,12 @@ pub fn extraction_to_graph(
     enum Ret {
         Expr(NodeIndex),
         Math(Expression),
+        Loop(String, Expression),
     }
+    // enum Ret {
+    //     Expr(NodeIndex),
+    //     Math(Expression),
+    // }
 
     fn recurse(
         egraph: &EGraph,
@@ -461,7 +468,7 @@ pub fn extraction_to_graph(
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(range) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Loop(label, range) = recurse(egraph, trajectory, current, g) else {
                     panic!()
                 };
                 *current += 1;
@@ -473,12 +480,12 @@ pub fn extraction_to_graph(
                     "LoopIn" => GraphTerm::LoopIn {
                         range,
                         stride,
-                        marker: "".to_string(),
+                        marker: label,
                     },
                     "LoopOut" => GraphTerm::LoopOut {
                         range,
                         stride,
-                        marker: "".to_string(),
+                        marker: label,
                     },
                     _ => panic!(),
                 });
@@ -625,6 +632,17 @@ pub fn extraction_to_graph(
             "MAccum" => {
                 *current += 1;
                 Ret::Math(Expression::from(Term::Acc('a')))
+            }
+            "Loop" => {
+                let label = egraph.nodes[trajectory[*current + 1]]
+                    .op
+                    .replace("Boxed(\"", "")
+                    .replace("\")", "");
+                *current += 2; // skip loop label
+                let Ret::Math(e) = recurse(egraph, trajectory, current, g) else {
+                    panic!()
+                };
+                Ret::Loop(label, e)
             }
             "MNum" | "MVar" => {
                 *current += 1;

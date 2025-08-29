@@ -1,4 +1,3 @@
-use egui::Color32;
 use itertools::Itertools;
 use luminal::{
     prelude::{
@@ -1069,7 +1068,7 @@ fn split_kernels(
             }
             if matches!(curr_term, GraphTerm::LoopIn { .. }) {
                 if neighbor_levels.is_empty() {
-                    display_graph(&marked_graph, &[(outputs[0], Color32::YELLOW)]);
+                    display_graph(&marked_graph);
                 }
                 neighbor_levels.pop().unwrap();
             }
@@ -1088,7 +1087,7 @@ fn split_kernels(
             }
             marked_graph.node_weight_mut(n).unwrap().1 = neighbor_levels;
         } else {
-            display_graph(&marked_graph, &[(n, Color32::YELLOW)]);
+            display_graph(&marked_graph);
             panic!("No seen neighbors when building loop levels!");
         }
         dfs.extend(marked_graph.neighbors_undirected(n));
@@ -1426,6 +1425,7 @@ fn split_kernels(
                 if let GraphTerm::LoopOut { range, stride, .. } = term {
                     if !stride.is_acc() && *stride != 0 {
                         new_size = new_size.max(stride.substitute('z', *range));
+                        new_size = new_size.max(stride.substitute('z', *range - 1) + 1);
                     }
                 } else if !matches!(term, GraphTerm::GMEM { .. }) {
                     break;
