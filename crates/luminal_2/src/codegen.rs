@@ -26,17 +26,108 @@ pub const MAX_THREADBLOCK_SIZE: usize = 1024; // this is max on mac
 pub const MAX_GRID_X: usize = 2147483647;
 pub const MAX_GRID_YZ: usize = 65535;
 
+pub type KernelGraph = StableGraph<GraphTerm, (), Directed>;
+pub type EnrichedKernelGraph = StableGraph<Kernel, (usize, usize), Directed>;
+pub type MapKernelGraphIndexToInputsIndex = HashMap<NodeIndex, usize>;
+pub type MetaDataVec = Vec<(
+    StableGraph<(GraphTerm, usize), (), Directed>,
+    Vec<(GMEMBuffer, NodeIndex)>, // (src buffer, current graph node)
+    Vec<(Expression, NodeIndex)>, // output node
+    Vec<(usize, NodeIndex, Expression)>, // (shared memory buffer name, node, buffer size)
+)>;
+
+fn build_map_kernel_graph_to_inputs(
+    kernels: &MetaDataVec,
+    map_kernel_graph_index_to_inputs_index: &mut MapKernelGraphIndexToInputsIndex,
+    meta_graph: &mut StableGraph<Kernel, (usize, usize)>,
+    global_input: NodeIndex,
+) {
+    for (n_kernel, (_, inputs, _, _)) in kernels.iter().enumerate() {
+        for (n_input, (input_kernel, _)) in inputs.into_iter().enumerate() {
+            match input_kernel {
+                // connect previous kernels outputs to this one's inputs
+                GMEMBuffer::PrevKernel { kernel, output } => meta_graph.add_edge(
+                    NodeIndex::new(*kernel),
+                    NodeIndex::new(n_kernel),
+                    (*output, n_input),
+                ),
+                GMEMBuffer::Input { node } => {
+                    let index =
+                        if let Some(index) = map_kernel_graph_index_to_inputs_index.get(node) {
+                            *index
+                        } else {
+                            map_kernel_graph_index_to_inputs_index
+                                .insert(*node, map_kernel_graph_index_to_inputs_index.len());
+                            map_kernel_graph_index_to_inputs_index.len() - 1
+                        };
+                    meta_graph.add_edge(global_input, NodeIndex::new(n_kernel), (index, n_input))
+                }
+            };
+        }
+    }
+}
+
+/*
+ * if there is a custom kernel passed through the graph,
+ * this function will ensure we don't codegen on it
+ */
+pub fn is_custom_kernel(
+    node: NodeIndex,
+    kernel_graph: &StableGraph<(GraphTerm, usize), ()>,
+    meta_graph: &mut StableGraph<Kernel, (usize, usize)>,
+) -> bool {
+    if kernel_graph
+        .node_weights()
+        .all(|(n, _)| matches!(n, GraphTerm::GMEM { .. } | GraphTerm::Custom(_)))
+    {
+        let (GraphTerm::Custom(custom_kernel), _) = kernel_graph
+            .node_weights()
+            .find(|(n, _)| matches!(n, GraphTerm::Custom(_)))
+            .unwrap()
+        else {
+            panic!("invalid kernel!")
+        };
+        // Would the input ordering be valid? lets assume it is for now
+        *meta_graph.node_weight_mut(node).unwrap() = custom_kernel.clone();
+        return true;
+    }
+    return false;
+}
+
+/*
+ * if there is a diff instruction passed through the graph,
+ * this function will ensure we don't codegen on it
+ */
+pub fn is_diff(
+    node: NodeIndex,
+    kernel_graph: &StableGraph<(GraphTerm, usize), ()>,
+    meta_graph: &mut StableGraph<Kernel, (usize, usize)>,
+) -> bool {
+    if kernel_graph
+        .node_weights()
+        .all(|(n, _)| matches!(n, GraphTerm::GMEM { .. } | GraphTerm::Diff(_)))
+    {
+        let (GraphTerm::Diff(diff), _) = kernel_graph
+            .node_weights()
+            .find(|(n, _)| matches!(n, GraphTerm::Diff(_)))
+            .unwrap()
+        else {
+            panic!("invalid kernel!")
+        };
+        meta_graph.node_weight_mut(node).unwrap().code = format!("Diff{diff}");
+        return true;
+    }
+    return false;
+}
+
 pub fn codegen(
-    graph: StableGraph<GraphTerm, (), Directed>,
+    graph: KernelGraph,
     outputs: Vec<NodeIndex>,
     mut arch: GPUArch,
     n_graph: usize,
     dyn_vars: &FxHashMap<char, usize>,
     print: bool,
-) -> Option<(
-    StableGraph<Kernel, (usize, usize), Directed>,
-    HashMap<NodeIndex, usize>,
-)> {
+) -> Option<(EnrichedKernelGraph, MapKernelGraphIndexToInputsIndex)> {
     let gmems = graph
         .node_weights()
         .filter(|w| matches!(w, GraphTerm::GMEM { .. }))
@@ -56,27 +147,16 @@ pub fn codegen(
         code: "Outputs".to_string(),
         ..Default::default()
     });
-    let mut gmem_mapping: HashMap<NodeIndex, usize> = HashMap::new();
-    for (n_kernel, (_, inputs, _, _)) in kernels.iter().enumerate() {
-        for (n_input, (input_kernel, _)) in inputs.into_iter().enumerate() {
-            match input_kernel {
-                GMEMBuffer::PrevKernel { kernel, output } => meta_graph.add_edge(
-                    NodeIndex::new(*kernel),
-                    NodeIndex::new(n_kernel),
-                    (*output, n_input),
-                ),
-                GMEMBuffer::Input { node } => {
-                    let index = if let Some(index) = gmem_mapping.get(node) {
-                        *index
-                    } else {
-                        gmem_mapping.insert(*node, gmem_mapping.len());
-                        gmem_mapping.len() - 1
-                    };
-                    meta_graph.add_edge(global_input, NodeIndex::new(n_kernel), (index, n_input))
-                }
-            };
-        }
-    }
+
+    let mut map_kernel_graph_index_to_inputs_index: MapKernelGraphIndexToInputsIndex =
+        HashMap::new();
+    build_map_kernel_graph_to_inputs(
+        &kernels,
+        &mut map_kernel_graph_index_to_inputs_index,
+        &mut meta_graph,
+        global_input,
+    );
+    // map output kernels on our meta_graph
     for (i, (output_kernel, output_index)) in output_kernels.clone().into_iter().enumerate() {
         meta_graph.add_edge(
             NodeIndex::new(output_kernel),
@@ -84,61 +164,43 @@ pub fn codegen(
             (output_index, i),
         );
     }
+
     for node in toposort(&meta_graph, None).unwrap() {
         if kernels.len() <= node.index() {
             continue; // Either input node or output node
         }
         let (kernel_graph, inputs, outputs, smem_buffers) = kernels[node.index()].clone();
-        // Handle custom kernels
-        if kernel_graph
-            .node_weights()
-            .all(|(n, _)| matches!(n, GraphTerm::GMEM { .. } | GraphTerm::Custom(_)))
-        {
-            let (GraphTerm::Custom(custom_kernel), _) = kernel_graph
-                .node_weights()
-                .find(|(n, _)| matches!(n, GraphTerm::Custom(_)))
-                .unwrap()
-            else {
-                panic!("invalid kernel!")
-            };
-            // Would the input ordering be valid? lets assume it is for now
-            *meta_graph.node_weight_mut(node).unwrap() = custom_kernel.clone();
+        // quickly check for no-ops in codegen
+        if is_custom_kernel(node, &kernel_graph, &mut meta_graph) {
             continue;
         }
-
-        // Handle diffs
-        if kernel_graph
-            .node_weights()
-            .all(|(n, _)| matches!(n, GraphTerm::GMEM { .. } | GraphTerm::Diff(_)))
-        {
-            let (GraphTerm::Diff(diff), _) = kernel_graph
-                .node_weights()
-                .find(|(n, _)| matches!(n, GraphTerm::Diff(_)))
-                .unwrap()
-            else {
-                panic!("invalid kernel!")
-            };
-            meta_graph.node_weight_mut(node).unwrap().code = format!("Diff{diff}");
+        if is_diff(node, &kernel_graph, &mut meta_graph) {
             continue;
         }
-
         validate_graph(&kernel_graph);
-        // display_graph(&kernel_graph, &[]);
+
         let mut node_to_var = inputs
             .iter()
-            .map(|(_, n)| *n)
-            .chain(outputs.iter().map(|(_, i)| *i))
-            .chain(smem_buffers.iter().map(|(_, i, _)| *i))
+            .map(|(_, input_node_id)| *input_node_id)
+            .chain(outputs.iter().map(|(_, output_node_id)| *output_node_id))
+            .chain(
+                smem_buffers
+                    .iter()
+                    .map(|(_, smem_node_id, _)| *smem_node_id),
+            )
             .enumerate()
-            .map(|(v, n)| (n, (v, true)))
+            .map(|(ordinal, node_id)| (node_id, (ordinal, true)))
             .collect::<HashMap<_, _>>();
-        for (_, (n, _)) in &node_to_var {
-            arch.add_metal_buffer_type(*n, "device ");
+        //set inputs & outputs to be in the device space
+        for (_, (ordinal, _)) in &node_to_var {
+            arch.add_metal_buffer_type(*ordinal, "device ");
         }
-        for (n, _, _) in &smem_buffers {
-            arch.add_metal_buffer_type(*n, "threadgroup ");
+        //setting smem to live at the threadgroup level
+        for (shared_buffer_memory_name, _, _) in &smem_buffers {
+            arch.add_metal_buffer_type(*shared_buffer_memory_name, "threadgroup ");
         }
         let mut loop_levels = vec![];
+
         let kernel = make_kernel(
             &kernel_graph,
             kernel_graph.node_indices().collect(),
@@ -148,7 +210,7 @@ pub fn codegen(
             &mut HashMap::new(),
             &smem_buffers
                 .iter()
-                .map(|(ind, node, _)| (*node, *ind))
+                .map(|(index, node_index, _)| (*node_index, *index))
                 .collect(),
             0,
             &mut arch,
@@ -323,7 +385,7 @@ kernel void kernel_name(
     if print {
         println!("END");
     }
-    Some((meta_graph, gmem_mapping))
+    Some((meta_graph, map_kernel_graph_index_to_inputs_index))
 }
 
 fn var_to_char(var: usize) -> String {
