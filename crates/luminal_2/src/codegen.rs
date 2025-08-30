@@ -241,7 +241,9 @@ pub fn codegen(
             return None;
         }
         let kernel_lines = kernel.into_iter().map(|s| format!("\t{s}")).join("\n");
-
+        // if node.index() == 0 {
+        //     display_graph(&kernel_graph, &[]);
+        // }
         let kernel = match &arch {
             GPUArch::CUDA => {
                 let inputs = inputs
@@ -274,8 +276,8 @@ pub fn codegen(
                 };
                 format!(
                     "extern \"C\" __global__ void kernel_name({inputs}) {{
-                    {smem_setup}{kernel_lines}
-                    }}"
+{smem_setup}{kernel_lines}
+}}"
                 )
             }
             GPUArch::Metal { .. } => {
@@ -344,14 +346,14 @@ pub fn codegen(
 
                 format!(
                     "#include <metal_stdlib>
-                    using namespace metal;
-                    kernel void kernel_name(
-                   	uint3 blockIdx [[threadgroup_position_in_grid]],
-                   	uint3 threadIdx [[thread_position_in_threadgroup]],
-                   	{input_string}{smem_input}
-                    ) {{
-                    {input_comment}{smem_setup}{kernel_lines}
-                    }}"
+using namespace metal;
+kernel void kernel_name(
+	uint3 blockIdx [[threadgroup_position_in_grid]],
+	uint3 threadIdx [[thread_position_in_threadgroup]],
+	{input_string}{smem_input}
+) {{
+{input_comment}{smem_setup}{kernel_lines}
+}}"
                 )
             }
         };
@@ -975,57 +977,52 @@ fn make_kernel(
                 b_inner_stride,
                 c_inner_stride,
                 k_outer_loops,
-            } => match &arch {
-                GPUArch::CUDA => {
-                    return None;
-                }
-                GPUArch::Metal { .. } => {
-                    let mut srcs = kernel_graph
-                        .edges_directed(node, Direction::Incoming)
-                        .sorted_by_key(|e| e.id())
-                        .map(|e| e.source());
-                    let (src_a, src_a_ptr) = node_to_var[&srcs.next().unwrap()];
-                    let (src_b, src_b_ptr) = node_to_var[&srcs.next().unwrap()];
-                    let dest = kernel_graph
-                        .neighbors_directed(node, Direction::Outgoing)
-                        .next()
-                        .unwrap();
-                    let (dest, dest_ptr) = node_to_var[&dest];
-                    assert!(src_a_ptr && src_b_ptr && dest_ptr);
-                    kernel_lines.push(
-                        format!(
-                            "
-     // TensorCore loop
-     simdgroup_float8x8 acc = simdgroup_float8x8(0);
-     for (uint tc_loop = 0; tc_loop < {}; tc_loop++) {{
-         threadgroup_barrier(mem_flags::mem_threadgroup); // For some reason this speeds it up
+            } => {
+                let mut srcs = kernel_graph
+                    .edges_directed(node, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source());
+                let (src_a, src_a_ptr) = node_to_var[&srcs.next().unwrap()];
+                let (src_b, src_b_ptr) = node_to_var[&srcs.next().unwrap()];
+                let dest = kernel_graph
+                    .neighbors_directed(node, Direction::Outgoing)
+                    .next()
+                    .unwrap();
+                let (dest, dest_ptr) = node_to_var[&dest];
+                assert!(src_a_ptr && src_b_ptr && dest_ptr);
+                kernel_lines.push(
+                    format!(
+                        "
+// TensorCore loop
+simdgroup_float8x8 acc = simdgroup_float8x8(0);
+for (uint tc_loop = 0; tc_loop < {}; tc_loop++) {{
+    threadgroup_barrier(mem_flags::mem_threadgroup); // For some reason this speeds it up
 
-         // Load sources into simdgroup matricies
-         simdgroup_float8x8 simdA;
-         simdgroup_load(simdA, {} + {}, {});
-         simdgroup_float8x8 simdB;
-         simdgroup_load(simdB, {} + {}, {});
+    // Load sources into simdgroup matricies
+    simdgroup_float8x8 simdA;
+    simdgroup_load(simdA, {} + {}, {});
+    simdgroup_float8x8 simdB;
+    simdgroup_load(simdB, {} + {}, {});
 
-         simdgroup_multiply_accumulate(acc, simdA, simdB, acc);
-     }}
-     simdgroup_store(acc, {}, {});",
-                            k_outer_loops.to_kernel(),
-                            var_to_char(src_a),
-                            a_k_stride.to_kernel().replace("const_z", "tc_loop"),
-                            a_inner_stride.substitute('z', 1).to_kernel(),
-                            var_to_char(src_b),
-                            b_k_stride.to_kernel().replace("const_z", "tc_loop"),
-                            b_inner_stride.substitute('z', 1).to_kernel(),
-                            var_to_char(dest),
-                            c_inner_stride.substitute('z', 1).to_kernel()
-                        )
-                        .split("\n")
-                        .map(|s| format!("{spacing}\t{s}"))
-                        .join("\n"),
-                    );
-                    node_to_var.insert(node, (dest, true));
-                }
-            },
+    simdgroup_multiply_accumulate(acc, simdA, simdB, acc);
+}}
+simdgroup_store(acc, {}, {});",
+                        k_outer_loops.to_kernel(),
+                        var_to_char(src_a),
+                        a_k_stride.to_kernel().replace("const_z", "tc_loop"),
+                        a_inner_stride.substitute('z', 1).to_kernel(),
+                        var_to_char(src_b),
+                        b_k_stride.to_kernel().replace("const_z", "tc_loop"),
+                        b_inner_stride.substitute('z', 1).to_kernel(),
+                        var_to_char(dest),
+                        c_inner_stride.substitute('z', 1).to_kernel()
+                    )
+                    .split("\n")
+                    .map(|s| format!("{spacing}\t{s}"))
+                    .join("\n"),
+                );
+                node_to_var.insert(node, (dest, true));
+            }
         }
     }
     Some(kernel_lines)

@@ -1,8 +1,5 @@
 #[cfg(feature = "metal")]
 use crate::{Buffer, Function};
-#[cfg(feature = "cuda")]
-use cudarc::driver::{CudaSlice, CudaStream};
-
 use crate::{
     Device, GPUArch, GraphTerm,
     codegen::{codegen, stitch_meta_graph_together},
@@ -236,7 +233,6 @@ pub fn assign_buffers(
     (master, buf_map)
 }
 
-// looks correct
 #[cfg(feature = "cuda")]
 pub fn compile_kernels(
     kernels: &StableGraph<Kernel, (usize, usize)>,
@@ -675,19 +671,4 @@ pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
         *d = unsafe { *ptr.add(i) };
     }
     data
-}
-
-#[cfg(feature = "cuda")]
-pub fn copy_cuda_buffer(v: &[f32], stream: &CudaStream) -> CudaSlice<f32> {
-    // Allocate device memory (in elements, not bytes)
-    let mut dst: CudaSlice<f32> = unsafe { stream.alloc(v.len()).expect("cuda alloc failed") };
-    // Host-to-device copy
-    stream.memcpy_htod(v, &mut dst).expect("HtoD memcpy failed");
-    dst
-}
-
-#[cfg(feature = "cuda")]
-pub fn copy_cuda_buffer_back(buf: &CudaSlice<f32>, stream: &CudaStream) -> Vec<f32> {
-    // Device-to-host copy (returns a Vec<f32>)
-    stream.memcpy_dtov(buf).expect("DtoH memcpy failed")
 }
