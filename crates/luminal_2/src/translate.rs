@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn test_node_indexes_consistency() {
         let cx = create_test_graph();
-        let (meta_graph, global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, global_map, _inits) = translate_graph(&cx);
 
         // Test that all original nodes are mapped to (meta_node, sub_node) pairs
         for orig_node in cx.graph.node_indices() {
@@ -590,7 +590,7 @@ mod tests {
         let a = cx.tensor(3).set([1., 4., 9.]);
         let _b = a.sqrt().retrieve();
 
-        let (meta_graph, global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, global_map, _inits) = translate_graph(&cx);
 
         // Find the sqrt operation in the translated graph
         let mut found_sqrt = false;
@@ -613,7 +613,7 @@ mod tests {
         let a = cx.tensor(3).set([1., 2., 3.]);
         let _b = a.exp2().retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_exp2 = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -635,7 +635,7 @@ mod tests {
         let a = cx.tensor(3).set([1., 2., 4.]);
         let _b = a.log2().retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_log2 = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -657,7 +657,7 @@ mod tests {
         let a = cx.tensor(3).set([0., 1.5708, 3.14159]);
         let _b = a.sin().retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_sin = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -679,7 +679,7 @@ mod tests {
         let a = cx.tensor(3).set([1., 2., 4.]);
         let _b = a.reciprocal().retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_recip = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -701,7 +701,7 @@ mod tests {
         let a = cx.tensor((2, 3)).set([[1., 2., 3.], [4., 5., 6.]]);
         let _b = a.permute((1, 0)).contiguous().retrieve();
 
-        let (_meta_graph, global_map, _inits) = translate_graph_meta(&cx);
+        let (_meta_graph, global_map, _inits) = translate_graph(&cx);
 
         // Contiguous should be handled correctly in the translation
         // It doesn't create a new GraphTerm but passes through the base node
@@ -718,7 +718,7 @@ mod tests {
         let b = cx.tensor(3).set([4., 5., 6.]);
         let _c = (a + b).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_add = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -741,7 +741,7 @@ mod tests {
         let b = cx.tensor(3).set([4., 5., 6.]);
         let _c = (a * b).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_mul = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -764,7 +764,7 @@ mod tests {
         let b = cx.tensor(3).set([2., 3., 4.]);
         let _c = (a % b).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_mod = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -787,7 +787,7 @@ mod tests {
         let b = cx.tensor(3).set([2., 4., 6.]);
         let _c = a.gt(b).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         let mut found_less_than = false;
         for meta_node_idx in meta_graph.node_indices() {
@@ -812,7 +812,7 @@ mod tests {
         let a = cx.tensor((2, 3)).set([[1., 2., 3.], [4., 5., 6.]]);
         let _b = a.sum(1).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         // Sum reduction should create Add nodes in the translated graph
         let mut found_reduce_add = false;
@@ -848,7 +848,7 @@ mod tests {
         let a = cx.tensor((2, 3)).set([[1., 2., 3.], [4., 5., 6.]]);
         let _b = a.max(1).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         // Max reduction should create Max nodes in the translated graph
         let mut found_reduce_max = false;
@@ -885,7 +885,7 @@ mod tests {
         let a = cx.constant(5.0);
         let _b = a.retrieve();
 
-        let (meta_graph, global_map, inits) = translate_graph_meta(&cx);
+        let (meta_graph, global_map, inits) = translate_graph(&cx);
 
         // Constants should be translated to GMEM nodes with appropriate init data
         let mut found_constant_gmem = false;
@@ -920,7 +920,7 @@ mod tests {
         let d = c * 10.0;
         cx.execute_debug();
 
-        let (meta_graph, global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, global_map, _inits) = translate_graph(&cx);
 
         // Graph break should create multiple meta nodes
         assert!(
@@ -961,7 +961,7 @@ mod tests {
         let d = c * a;
         let _e = d.sum(0).retrieve();
 
-        let (meta_graph, global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, global_map, _inits) = translate_graph(&cx);
 
         // Verify all original nodes are mapped
         for orig_node in cx.graph.node_indices() {
@@ -989,7 +989,7 @@ mod tests {
         let b = cx.tensor((2, 3)).set([[7., 8., 9.], [10., 11., 12.]]);
         let _c = (a + b).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         // Check that LoopIn and LoopOut nodes are created properly
         let mut found_loop_in = false;

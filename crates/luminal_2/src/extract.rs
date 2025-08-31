@@ -4,22 +4,32 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::usize;
 
+use crate::Kernel;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
-use crate::{Buffer, Device, Kernel};
+#[cfg(feature = "metal")]
+use crate::{Buffer, Device};
 use crate::{GPUArch, GraphTerm};
+#[cfg(feature = "cuda")]
+use anyhow::Result;
 use colored::Colorize;
+#[cfg(feature = "cuda")]
+use cudarc::driver::{CudaContext, CudaSlice, DriverError};
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
 use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
 use luminal::shape::{Expression, Term};
+#[cfg(feature = "metal")]
 use objc2::rc::autoreleasepool;
+#[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
@@ -646,6 +656,60 @@ pub fn extraction_to_graph(
     g
 }
 
+#[cfg(feature = "cuda")]
+fn cost<'a>(
+    kernels: &StableGraph<Kernel, (usize, usize), Directed>,
+    inputs: &[(NodeIndex, InitData)],
+    gmem_mapping: &HashMap<NodeIndex, usize>,
+    dyn_vars: &FxHashMap<char, usize>,
+) -> Option<(Cost, Vec<Vec<f32>>)> {
+    let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
+    let compiled_kernels = compile_kernels(&kernels);
+    let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
+    // allocation
+    let mut inputs = inputs
+        .into_iter()
+        .map(|(n, b)| {
+            (
+                gmem_mapping[n],
+                (
+                    copy_cuda_buffer(&b.clone().to_vec(dyn_vars), ctx.clone()),
+                    false,
+                ),
+            )
+        })
+        .collect::<FxHashMap<_, _>>();
+    for _ in 0..WARMUP_TRIALS {
+        run_graph(
+            &mut inputs,
+            &kernels,
+            dyn_vars,
+            &compiled_kernels,
+            &int_buffers,
+            &int_buffer_map,
+        );
+    }
+    let mut micros = vec![];
+    let mut outputs = vec![];
+    let mut m;
+    for _ in 0..TRIALS {
+        (outputs, m) = run_graph(
+            &mut inputs,
+            &kernels,
+            dyn_vars,
+            &compiled_kernels,
+            &int_buffers,
+            &int_buffer_map,
+        );
+        micros.push(m);
+    }
+    Some((
+        micros.into_iter().sum::<u128>() / TRIALS as u128,
+        outputs.iter().map(copy_cuda_buffer_back).collect_vec(),
+    ))
+}
+
+#[cfg(feature = "metal")]
 fn cost<'a>(
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
     inputs: &[(NodeIndex, InitData)],
@@ -704,6 +768,24 @@ fn cost<'a>(
     })
 }
 
+#[cfg(feature = "cuda")]
+pub fn copy_cuda_buffer(v: &[f32], ctx: Arc<CudaContext>) -> CudaSlice<f32> {
+    assert!(!v.is_empty(), "Can't copy empty slice to device");
+
+    // Then copy host data to the allocated device memory
+    let stream = ctx.default_stream();
+    let mut dst = stream.alloc_zeros::<f32>(v.len()).unwrap();
+    stream.memcpy_htod(v, &mut dst).unwrap();
+    dst
+}
+
+/// Device -> Host (like contents() memcpy back)
+#[cfg(feature = "cuda")]
+pub fn copy_cuda_buffer_back(buf: &CudaSlice<f32>) -> Vec<f32> {
+    buf.stream().memcpy_dtov(buf).unwrap()
+}
+
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     assert!(v.len() > 0);
     unsafe {
@@ -717,6 +799,7 @@ pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
             .unwrap()
     }
 }
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
     let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
     let ptr = v.contents().as_ptr() as *mut f32;
@@ -775,8 +858,8 @@ pub fn make_test_inputs(
 mod tests {
     use super::*;
     use crate::{
-        translate::{MetaGraph, SubGraph, translate_graph_meta},
-        utils::{build_search_space, display_graph},
+        translate::{MetaGraph, SubGraph, translate_graph},
+        utils::build_search_space,
     };
     use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
 
@@ -795,7 +878,7 @@ mod tests {
         let d = c * a;
         let _e = d.sum(0).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
         let meta_node = meta_graph
             .node_indices()
             .next()

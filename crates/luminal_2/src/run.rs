@@ -1,12 +1,16 @@
 #[cfg(feature = "metal")]
-use crate::{Buffer, Function};
+use crate::{Buffer, Device, Function};
 use crate::{
-    Device, GPUArch, GraphTerm,
+    GPUArch, GraphTerm,
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
     translate::{InitData, OptimalGraphNodeIndex, SubGraphNodeIndex, translate_graph},
 };
 use itertools::Itertools;
+
+#[cfg(feature = "cuda")]
+use cudarc::{driver::*, nvrtc::CompileOptions};
+
 use luminal::{
     prelude::{
         Graph, GraphTensor, NodeIndex,
@@ -19,6 +23,7 @@ use luminal::{
     },
     shape::Expression,
 };
+#[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
@@ -651,6 +656,7 @@ pub fn run_graph(
     })
 }
 
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     let buf = unsafe {
         device
@@ -664,6 +670,7 @@ pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     buf
 }
 
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
     let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
     let ptr = v.contents().as_ptr() as *mut f32;

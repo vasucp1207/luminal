@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["metal"]
+default = ["cuda"]
 cuda = ["dep:cudarc", "dep:luminal_cuda"]
-metal = []
+metal = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 
 [dependencies]
 luminal = {path="../../"}
@@ -16,8 +16,8 @@ cudarc = { version = "0.16.6", features = [
 	"cuda-12080",
 ], optional=true}
 #metal-rs = { version = "0.28.0", package = "metal", optional=true }
-objc2 = "0.6.2"
-objc2-metal = "0.3.1"
+objc2 = {version="0.6.2", optional=true}
+objc2-metal = {version="0.3.1", optional=true}
 itertools = "0.14.0"
 egglog = { git = "https://github.com/egraphs-good/egglog", rev="762c32004c67a02161f59502c011f24e5943dc20" }
 egglog_proof = { git = "https://github.com/MilkBlock/egglog", rev="e1664786863a19b05d40e30a20b961aa09ea8e2e", package="egglog" }
@@ -38,6 +38,7 @@ ratatui = "0.29.0"
 crossterm = "0.29.0"
 libc = "0.2.174"
 unicode-width = "0.2"
-objc2-foundation = "0.3.1"
+objc2-foundation = {version="0.3.1", optional=true}
 eframe = "0.28"
 egui = "0.28"
+anyhow = "1.0.99"
