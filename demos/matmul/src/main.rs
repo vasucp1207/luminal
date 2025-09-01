@@ -18,7 +18,7 @@ use rustc_hash::FxHashMap;
 fn main() {
     objc2::rc::autoreleasepool(|_| {
         #[allow(non_snake_case)]
-        let (M, K, N) = (2048, 2048, 2048);
+        let (M, K, N) = (512, 512, 512);
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
@@ -105,7 +105,6 @@ fn main() {
             GPUArch::Metal(HashMap::default()),
             0,
             &HashMap::default(),
-            false,
         )
         .unwrap();
 

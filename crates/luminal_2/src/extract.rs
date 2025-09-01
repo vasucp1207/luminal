@@ -23,7 +23,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 10_000;
+const MAX_SEARCHED_GRAPHS: usize = 100_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -36,7 +36,6 @@ const INVALID_IR: &[&str] = &[
     "TiledMatmulInputA",
     "TiledMatmulInputB",
     "TiledMatmulAcc",
-    "FusedLoops",
 ];
 
 type Cost = u128; // Execution time in microseconds
@@ -325,7 +324,7 @@ pub fn search(
 
         let root = graph.externals(Direction::Outgoing).next().unwrap();
         let Some((kernels, gmem_mapping)) =
-            crate::codegen::codegen(graph.clone(), vec![root], arch.clone(), 0, dyn_vars, false)
+            crate::codegen::codegen(graph.clone(), vec![root], arch.clone(), 0, dyn_vars)
         else {
             continue;
         };
@@ -404,9 +403,6 @@ pub fn search(
                     if og_kernels.is_empty() {
                         og_kernels = kernel_string.clone();
                     }
-                    // if kernel_string.len() < fastest.len() || fastest.is_empty() {
-
-                    // }
                     if us < best_time {
                         best_time = us;
                         best_graph = Some(graph);
@@ -433,12 +429,7 @@ pub fn extraction_to_graph(
     enum Ret {
         Expr(NodeIndex),
         Math(Expression),
-        Loop(String, Expression),
     }
-    // enum Ret {
-    //     Expr(NodeIndex),
-    //     Math(Expression),
-    // }
 
     fn recurse(
         egraph: &EGraph,
@@ -448,7 +439,7 @@ pub fn extraction_to_graph(
     ) -> Ret {
         let node_choice = trajectory[*current];
         let enode = &egraph.nodes[node_choice];
-        let r = match enode.op.as_str() {
+        match enode.op.as_str() {
             "GMEM" => {
                 *current += 1;
                 Ret::Expr(
@@ -469,9 +460,6 @@ pub fn extraction_to_graph(
                     panic!()
                 };
                 *current += 1;
-                // let Ret::Loop(label, range) = recurse(egraph, trajectory, current, g) else {
-                //     panic!()
-                // };
                 let Ret::Math(range) = recurse(egraph, trajectory, current, g) else {
                     panic!()
                 };
@@ -580,6 +568,13 @@ pub fn extraction_to_graph(
                 g.add_edge(child_one, r, ());
                 Ret::Expr(r)
             }
+            "FusedLoops" => {
+                *current += 1;
+                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
+                    panic!()
+                };
+                Ret::Expr(child_one)
+            }
             // ----------- literals & vars -----------
             op if op.starts_with("MNum:") => {
                 let num: i64 = op["MNum:".len()..].parse().expect("invalid MNum literal");
@@ -636,17 +631,6 @@ pub fn extraction_to_graph(
                 *current += 1;
                 Ret::Math(Expression::from(Term::Acc('a')))
             }
-            // "Loop" => {
-            //     let label = egraph.nodes[trajectory[*current + 1]]
-            //         .op
-            //         .replace("Boxed(\"", "")
-            //         .replace("\")", "");
-            //     *current += 2; // skip loop label
-            //     let Ret::Math(e) = recurse(egraph, trajectory, current, g) else {
-            //         panic!()
-            //     };
-            //     Ret::Loop(label, e)
-            // }
             "MNum" | "MVar" => {
                 *current += 1;
                 recurse(egraph, trajectory, current, g)
@@ -658,9 +642,7 @@ pub fn extraction_to_graph(
                     panic!("unsupported op '{}'", enode.op)
                 }
             }
-        };
-        // println!("exit: {}", enode.op);
-        r
+        }
     }
 
     recurse(egraph, trajectory, &mut 0, &mut g);

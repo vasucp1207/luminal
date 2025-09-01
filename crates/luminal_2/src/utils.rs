@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, io::Write};
 
-use egglog::{EGraph, Error, Term, prelude::exprs::var};
+use egglog::{CommandOutput, EGraph, Error, Term, prelude::exprs::var};
 use egui::Color32;
 use itertools::Itertools;
 use luminal::{
@@ -485,10 +485,9 @@ pub fn render_egglog_inline(
 fn run_egglog_program(
     code: &str,
     root: &str,
-) -> Result<(Vec<String>, egraph_serialize::EGraph), Error> {
+) -> Result<(Vec<CommandOutput>, egraph_serialize::EGraph), Error> {
     // Create a fresh EGraph with all the defaults
     let mut egraph = EGraph::default();
-    egraph.enable_messages();
     let commands = egraph.parser.get_program_from_string(None, code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;
@@ -497,7 +496,7 @@ fn run_egglog_program(
         .unwrap_or_default()
     {
         println!("Took {}ms", start.elapsed().as_millis());
-        println!("Run Report:  {}", egraph.get_run_report().as_ref().unwrap());
+        println!("Run Report:  {}", egraph.get_overall_run_report());
     }
     let (sort, value) = egraph.eval_expr(&egglog::var!(root))?;
     // let (_petgraph, _root_idx) = dag_to_petgraph(&termdag, termdag.lookup(&root));
@@ -511,12 +510,12 @@ fn run_egglog_program(
     {
         println!(
             "Nodes: {} Roots: {} Class Data: {}",
-            s.nodes.len(),
-            s.root_eclasses.len(),
-            s.class_data.len()
+            s.egraph.nodes.len(),
+            s.egraph.root_eclasses.len(),
+            s.egraph.class_data.len()
         );
     }
-    Ok((msgs, s))
+    Ok((msgs, s.egraph))
 }
 
 pub fn print_kernels(kernels: &StableGraph<Kernel, (usize, usize), Directed>) -> String {

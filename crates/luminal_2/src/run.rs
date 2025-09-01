@@ -118,7 +118,6 @@ pub fn chunk_based_search_compiler(
             GPUArch::Metal(HashMap::default()),
             0,
             &original_graph.dyn_map,
-            false,
         )
         .unwrap();
 

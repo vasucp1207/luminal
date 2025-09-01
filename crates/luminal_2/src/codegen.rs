@@ -31,11 +31,11 @@ pub fn codegen(
     mut arch: GPUArch,
     n_graph: usize,
     dyn_vars: &FxHashMap<char, usize>,
-    print: bool,
 ) -> Option<(
     StableGraph<Kernel, (usize, usize), Directed>,
     HashMap<NodeIndex, usize>,
 )> {
+    // display_graph(&graph);
     let gmems = graph
         .node_weights()
         .filter(|w| matches!(w, GraphTerm::GMEM { .. }))
@@ -184,9 +184,6 @@ pub fn codegen(
             return None;
         }
         let kernel_lines = kernel.into_iter().map(|s| format!("\t{s}")).join("\n");
-        // if node.index() == 0 {
-        //     display_graph(&kernel_graph, &[]);
-        // }
         let kernel = match &arch {
             GPUArch::CUDA => {
                 let inputs = inputs
@@ -294,6 +291,8 @@ kernel void kernel_name(
             .unwrap()
             > MAX_THREADBLOCK_SIZE
         {
+            // println!("Tb too big: {:?}", threadblock);
+            // println!("{kernel}");
             return None;
         }
         if grid[0].exec(dyn_vars).unwrap() > MAX_GRID_X {
@@ -312,9 +311,6 @@ kernel void kernel_name(
             smem: smem_buffers.into_iter().map(|(_, _, a)| a).sum(),
             outputs: outputs.into_iter().map(|(o, _)| o.simplify()).collect(),
         };
-    }
-    if print {
-        println!("END");
     }
     Some((meta_graph, gmem_mapping))
 }
