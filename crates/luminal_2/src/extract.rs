@@ -363,6 +363,7 @@ pub fn search(
                         println!("Graph {valid_graphs} {us}µs");
                         if ref_outputs.is_empty() {
                             ref_outputs = outs;
+                            println!("{}", "Initial".bold().on_bright_green());
                         } else {
                             for (a, b) in ref_outputs.iter().zip(&outs) {
                                 for (x, y) in a.iter().zip(b) {
