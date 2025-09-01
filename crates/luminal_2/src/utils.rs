@@ -163,7 +163,7 @@ pub fn build_search_space(
     iters: usize,
 ) -> egraph_serialize::EGraph {
     let (rendered, root) = render_egglog(graph, "t");
-    if option_env!("DEBUG").is_some() {
+    if option_env!("PRINT_EGGLOG").is_some() {
         println!("{rendered}");
         // println!("{}", render_egglog(graph, "a").0);
     }
@@ -490,11 +490,13 @@ fn run_egglog_program(
     let mut egraph = EGraph::default();
     egraph.enable_messages();
     let commands = egraph.parser.get_program_from_string(None, code)?;
+    let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;
     if option_env!("PRINT_EGGLOG")
         .map(|s| s.parse::<i32>().map(|i| i == 1).unwrap_or_default())
         .unwrap_or_default()
     {
+        println!("Took {}ms", start.elapsed().as_millis());
         println!("Run Report:  {}", egraph.get_run_report().as_ref().unwrap());
     }
     let (sort, value) = egraph.eval_expr(&egglog::var!(root))?;

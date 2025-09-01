@@ -1,5 +1,6 @@
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
+use egui::Color32;
 use itertools::Itertools;
 use luminal::prelude::{
     petgraph::{visit::EdgeRef, Direction},
@@ -7,7 +8,7 @@ use luminal::prelude::{
 };
 use luminal_2::{
     codegen::{codegen, stitch_meta_graph_together},
-    debug::display_graph,
+    debug::{display_graph, Debugger, DisplayGraph, NodeShape, View},
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
@@ -23,11 +24,11 @@ fn main() {
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
-        // let out = a.matmul(b);
-        let (m, _) = a.dims2();
-        let (_, n) = b.dims2();
-        // Broadcasted Multiply
-        let out = a.expand_dim(1, n) * b.permute((1, 0)).expand_dim(0, m);
+        let out = a.matmul(b);
+        // let (m, _) = a.dims2();
+        // let (_, n) = b.dims2();
+        // // Broadcasted Multiply
+        // let out = a.expand_dim(1, n) * b.permute((1, 0)).expand_dim(0, m);
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
@@ -105,7 +106,7 @@ fn main() {
             unified_map.insert(k, meta_to_final[&v]);
         }
         let (kernels, gmem_mapping) = codegen(
-            graph,
+            graph.clone(),
             outputs,
             GPUArch::Metal(HashMap::default()),
             0,
@@ -145,6 +146,7 @@ fn main() {
         }
 
         let (outputs, _) = run_graph(
+            &graph,
             &mut inputs,
             &kernels,
             &FxHashMap::default(),

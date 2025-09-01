@@ -28,8 +28,8 @@ pub enum DisplayMode {
     LoopLevel,
 }
 
-type DisplayNode = (String, egui::Color32, NodeShape, Option<usize>);
-type DisplayGraph = StableGraph<DisplayNode, ()>;
+pub type DisplayNode = (String, egui::Color32, NodeShape, Option<usize>);
+pub type DisplayGraph = StableGraph<DisplayNode, ()>;
 
 pub fn display_graph(graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>) {
     display_multiple_graphs(&[graph]);
@@ -135,7 +135,7 @@ fn to_display_graph<T: TermToString, E: EdgeToString>(
     dg
 }
 
-struct View {
+pub struct View {
     g: DisplayGraph,
     pos: Vec<Pos2>,
     dragging: Option<usize>,
@@ -144,7 +144,7 @@ struct View {
 }
 
 impl View {
-    fn new(g: DisplayGraph) -> Self {
+    pub fn new(g: DisplayGraph) -> Self {
         Self {
             pos: layered_layout(&g, 140.0, 120.0, 100.0),
             g,
@@ -155,12 +155,12 @@ impl View {
     }
 }
 
-struct Debugger {
+pub struct Debugger {
     views: Vec<View>,
 }
 
 impl Debugger {
-    fn new(views: Vec<View>) -> Self {
+    pub fn new(views: Vec<View>) -> Self {
         Self { views }
     }
 }
@@ -319,7 +319,7 @@ impl eframe::App for Debugger {
     }
 }
 #[derive(Clone, Copy)]
-struct Camera {
+pub struct Camera {
     zoom: f32, // scale
     pan: Vec2, // screen px offset
     display_mode: DisplayMode,

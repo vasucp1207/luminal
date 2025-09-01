@@ -158,11 +158,21 @@
 
 
 ; Loop Fusion
-(ruleset fusion)
-;(rewrite (LoopIn (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (Binary ?bin ?a ?b) :ruleset fusion)
-;(rewrite (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (FusedLoops ?a ?range) :ruleset fusion)
-;(rewrite (LoopIn (FusedLoops (LoopOut ?a (Loop ?loopA ?range) ?st) ?fused_range) (Loop ?loopB ?range) ?st) (FusedLoops ?a (MMul ?range ?fused_range)) :ruleset fusion)
-;(rewrite (LoopIn (FusedLoops (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) ?fused_range) (Loop ?loopB ?range) ?st) (Binary ?bin ?a ?b) :ruleset fusion)
+(rewrite (LoopIn (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (Binary ?bin ?a ?b) :ruleset ir)
+(rewrite
+	(LoopIn (LoopIn
+		(LoopOut (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2)
+	(Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Binary ?bin ?a ?b)
+	 :ruleset ir
+)
+(rewrite
+	(LoopIn (LoopIn (LoopIn
+		(LoopOut (LoopOut (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2) (Loop ?loopA3 ?range3) ?st3)
+	(Loop ?loopB3 ?range3) ?st3) (Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Binary ?bin ?a ?b)
+	 :ruleset ir
+)
 
 ; Tiling
 (rewrite
@@ -228,7 +238,7 @@
 		(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") (MNum ?rangeI))) (MReplace ?stI (MVar "z") (MMod (MVar "z") (MNum ?rangeI))))
 	)
 	;:when ((!= (MNum 0) (MVar "t")))
-	:ruleset ir
+	;:ruleset ir
 )
 (rewrite
 	(MergeLoops
@@ -447,40 +457,47 @@
 (rewrite
 	(LoopOut (LoopOut ?x (Loop ?innerLoop ?innerRange) ?innerStride) (Loop ?outerLoop ?outerRange) ?outerStride)
 	(LoopOut (LoopOut (SwapLoops ?x ?innerLoop ?outerLoop) (Loop (+ ?outerLoop (+ "sw" ?innerLoop)) ?outerRange) ?outerStride) (Loop (+ ?innerLoop (+ "sw" ?outerLoop)) ?innerRange) ?innerStride)
-	:ruleset ir
+	;:ruleset ir
+	:when ((!= ?innerStride (MAccum "a")))
 )
 (rewrite
 	(SwapLoops (LoopIn (LoopIn ?x (Loop ?outerLoop ?outerRange) ?outerStride) (Loop ?innerLoop ?innerRange) ?innerStride) ?innerLoop ?outerLoop)
 	(LoopIn (LoopIn ?x (Loop (+ ?innerLoop (+ "sw" ?outerLoop)) ?innerRange) ?innerStride) (Loop (+ ?outerLoop (+ "sw" ?innerLoop)) ?outerRange) ?outerStride)
+	:subsume
 	:ruleset ir-prop
 )
 ; propogate
 (rewrite
 	(SwapLoops (LoopOut ?x ?loop ?stride) ?innerLoop ?outerLoop)
 	(LoopOut (SwapLoops ?x ?innerLoop ?outerLoop) ?loop ?stride)
+	:subsume
 	:ruleset ir-prop
 )
 (rewrite
 	(SwapLoops (LoopIn ?x (Loop ?loop ?range) ?stride) ?innerLoop ?outerLoop)
 	(LoopIn (SwapLoops ?x ?innerLoop ?outerLoop) (Loop ?loop ?range) ?stride)
 	:when ((!= ?loop ?outerLoop))
+	:subsume
 	:ruleset ir-prop
 )
 (rewrite
 	(SwapLoops (Binary ?bin ?a ?b) ?innerLoop ?outerLoop)
 	(Binary ?bin (SwapLoops ?a ?innerLoop ?outerLoop) (SwapLoops ?b ?innerLoop ?outerLoop))
+	:subsume
 	:ruleset ir-prop
 )
 
 {code}
 (run-schedule
-	(run ir-generic)
-	(repeat 7
+	(saturate ir-generic)
+	(repeat 2
 		(run ir)
-		(repeat 3 ir-prop)
-		(repeat 3 expr)
+		(saturate ir-prop)
+		(saturate expr)
+		(saturate ir-generic)
 	)
-	(run ir-generic)
+	(saturate ir-generic)
+	(saturate tc)
 )
 
 ;(ruleset loop-blank)

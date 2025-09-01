@@ -161,6 +161,7 @@ pub fn chunk_based_search_compiler(
         let compiled_kernels = compile_kernels(&kernels);
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
         let (outputs, _) = run_graph(
+            &StableGraph::default(),
             &mut inputs,
             &kernels,
             &original_graph.dyn_map,
@@ -431,6 +432,7 @@ pub fn run_graph(
 
 #[cfg(feature = "metal")]
 pub fn run_graph(
+    graph: &StableGraph<GraphTerm, ()>,
     inputs: &mut FxHashMap<usize, (Buffer, bool)>,
     kernels: &StableGraph<Kernel, (usize, usize)>,
     dyn_vars: &FxHashMap<char, usize>,
@@ -548,13 +550,15 @@ pub fn run_graph(
                 use objc2_metal::{
                     MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder, MTLSize,
                 };
-
                 let encoder = command_buffer.computeCommandEncoder().unwrap();
-                encoder.setComputePipelineState(
-                    &device
-                        .newComputePipelineStateWithFunction_error(&compiled_kernels[&kernel.code])
-                        .unwrap(),
-                );
+                let Ok(c) = device
+                    .newComputePipelineStateWithFunction_error(&compiled_kernels[&kernel.code])
+                else {
+                    println!("failed to compile {}", kernel.code);
+                    crate::debug::display_graph(graph);
+                    panic!();
+                };
+                encoder.setComputePipelineState(&c);
 
                 // set inputs
                 let mut buffer_count = 0;

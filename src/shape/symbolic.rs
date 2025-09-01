@@ -243,7 +243,7 @@ impl Expression {
             let new_symbol = match term {
                 Term::Num(n) => n.to_string(),
                 Term::Var(c) => format!("const_{c}"),
-                Term::Acc(_) => "1".to_string(),
+                Term::Acc(_) => unreachable!(),
                 Term::Max => format!(
                     "max((int){}, (int){})",
                     symbols.pop().unwrap(),

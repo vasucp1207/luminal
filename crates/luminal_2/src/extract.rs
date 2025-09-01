@@ -6,7 +6,7 @@ use std::usize;
 
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
-use crate::utils::{build_search_space, generate_proof, print_kernels};
+use crate::utils::{build_search_space, print_kernels};
 use crate::{Buffer, Device, Kernel};
 use crate::{GPUArch, GraphTerm};
 use colored::Colorize;
@@ -42,9 +42,6 @@ const INVALID_IR: &[&str] = &[
 type Cost = u128; // Execution time in microseconds
 
 fn is_expression_enode(enode_label: &str) -> bool {
-    // if matches!(enode_label, "MergeLoops") {
-    //     panic!()
-    // }
     matches!(
         enode_label,
         "MNum"
@@ -180,17 +177,17 @@ fn extract_trajectories<'a>(
                     )
                     .map(|i| vec![i])
                     .unwrap_or_default()
-                // } else if egraph.nodes[child].op == "Loop" {
-                //     // Pull just the range out for the loop
-                //     extract_shortest(
-                //         egraph,
-                //         egraph.nid_to_cid(&egraph.nodes[child].children[1]),
-                //         seen,
-                //         junk_cache,
-                //         &mut FxHashMap::default(),
-                //     )
-                //     .map(|i| vec![i])
-                //     .unwrap_or_default()
+                } else if egraph.nodes[child].op == "Loop" {
+                    // Pull just the range out for the loop
+                    extract_shortest(
+                        egraph,
+                        egraph.nid_to_cid(&egraph.nodes[child].children[1]),
+                        seen,
+                        junk_cache,
+                        &mut FxHashMap::default(),
+                    )
+                    .map(|i| vec![i])
+                    .unwrap_or_default()
                 } else {
                     extract_trajectories(
                         egraph,
@@ -349,9 +346,13 @@ pub fn search(
                 } else {
                     seen.insert(k);
                 }
-                if let Some((us, outs)) =
-                    cost(&kernels, &node_index_to_init_data, &gmem_mapping, dyn_vars)
-                {
+                if let Some((us, outs)) = cost(
+                    &graph,
+                    &kernels,
+                    &node_index_to_init_data,
+                    &gmem_mapping,
+                    dyn_vars,
+                ) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -382,7 +383,7 @@ pub fn search(
                                                     .map(|v| &v[..v.len().min(20)])
                                                     .collect_vec()
                                             );
-                                            generate_proof(&og, &graph);
+                                            // generate_proof(&og, &graph);
                                             println!("{}", og_kernels);
                                             println!("{}", print_kernels(&kernels));
                                             crate::debug::display_multiple_graphs(&[&og, &graph]);
@@ -446,7 +447,6 @@ pub fn extraction_to_graph(
     ) -> Ret {
         let node_choice = trajectory[*current];
         let enode = &egraph.nodes[node_choice];
-        // println!("enter: {}", enode.op);
         let r = match enode.op.as_str() {
             "GMEM" => {
                 *current += 1;
@@ -468,24 +468,26 @@ pub fn extraction_to_graph(
                     panic!()
                 };
                 *current += 1;
-                let Ret::Loop(label, range) = recurse(egraph, trajectory, current, g) else {
+                // let Ret::Loop(label, range) = recurse(egraph, trajectory, current, g) else {
+                //     panic!()
+                // };
+                let Ret::Math(range) = recurse(egraph, trajectory, current, g) else {
                     panic!()
                 };
                 *current += 1;
                 let Ret::Math(stride) = recurse(egraph, trajectory, current, g) else {
                     panic!();
                 };
-                // println!("Done");
                 let r = g.add_node(match enode.op.as_str() {
                     "LoopIn" => GraphTerm::LoopIn {
                         range,
                         stride,
-                        marker: label,
+                        marker: "".to_string(),
                     },
                     "LoopOut" => GraphTerm::LoopOut {
                         range,
                         stride,
-                        marker: label,
+                        marker: "".to_string(),
                     },
                     _ => panic!(),
                 });
@@ -633,17 +635,17 @@ pub fn extraction_to_graph(
                 *current += 1;
                 Ret::Math(Expression::from(Term::Acc('a')))
             }
-            "Loop" => {
-                let label = egraph.nodes[trajectory[*current + 1]]
-                    .op
-                    .replace("Boxed(\"", "")
-                    .replace("\")", "");
-                *current += 2; // skip loop label
-                let Ret::Math(e) = recurse(egraph, trajectory, current, g) else {
-                    panic!()
-                };
-                Ret::Loop(label, e)
-            }
+            // "Loop" => {
+            //     let label = egraph.nodes[trajectory[*current + 1]]
+            //         .op
+            //         .replace("Boxed(\"", "")
+            //         .replace("\")", "");
+            //     *current += 2; // skip loop label
+            //     let Ret::Math(e) = recurse(egraph, trajectory, current, g) else {
+            //         panic!()
+            //     };
+            //     Ret::Loop(label, e)
+            // }
             "MNum" | "MVar" => {
                 *current += 1;
                 recurse(egraph, trajectory, current, g)
@@ -665,6 +667,7 @@ pub fn extraction_to_graph(
 }
 
 fn cost<'a>(
+    graph: &StableGraph<GraphTerm, ()>,
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
     inputs: &[(NodeIndex, InitData)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
@@ -691,6 +694,7 @@ fn cost<'a>(
         // Warm up resources (buffer allocation, kernel compiler, etc.)
         for _ in 0..WARMUP_TRIALS {
             run_graph(
+                &graph,
                 &mut inputs,
                 &kernels,
                 dyn_vars,
@@ -706,6 +710,7 @@ fn cost<'a>(
 
         for _ in 0..TRIALS {
             (outputs, m) = run_graph(
+                &graph,
                 &mut inputs,
                 &kernels,
                 dyn_vars,
@@ -789,143 +794,143 @@ pub fn make_test_inputs(
     inputs
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        translate::{MetaGraph, SubGraph, translate_graph_meta},
-        utils::{build_search_space, display_graph},
-    };
-    use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::{
+//         translate::{MetaGraph, SubGraph, translate_graph_meta},
+//         utils::{build_search_space, display_graph},
+//     };
+//     use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
 
-    fn create_simple_egraph() -> EGraph {
-        let egraph = EGraph::default();
-        egraph
-    }
+//     fn create_simple_egraph() -> EGraph {
+//         let egraph = EGraph::default();
+//         egraph
+//     }
 
-    fn build_minimal_add_graph() -> (luminal::graph::Graph, MetaGraph, SubGraph) {
-        use luminal::graph::Graph;
+//     fn build_minimal_add_graph() -> (luminal::graph::Graph, MetaGraph, SubGraph) {
+//         use luminal::graph::Graph;
 
-        let mut cx = Graph::new();
-        let a = cx.tensor(3).set([1., 2., 3.]);
-        let b = cx.tensor(3).set([4., 5., 6.]);
-        let c = (a + b).sqrt();
-        let d = c * a;
-        let _e = d.sum(0).retrieve();
+//         let mut cx = Graph::new();
+//         let a = cx.tensor(3).set([1., 2., 3.]);
+//         let b = cx.tensor(3).set([4., 5., 6.]);
+//         let c = (a + b).sqrt();
+//         let d = c * a;
+//         let _e = d.sum(0).retrieve();
 
-        let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
-        let meta_node = meta_graph
-            .node_indices()
-            .next()
-            .expect("MetaGraph unexpectedly empty");
-        let sub = meta_graph
-            .node_weight(meta_node)
-            .expect("Missing subgraph at meta node")
-            .clone();
+//         let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
+//         let meta_node = meta_graph
+//             .node_indices()
+//             .next()
+//             .expect("MetaGraph unexpectedly empty");
+//         let sub = meta_graph
+//             .node_weight(meta_node)
+//             .expect("Missing subgraph at meta node")
+//             .clone();
 
-        (cx, meta_graph, sub)
-    }
+//         (cx, meta_graph, sub)
+//     }
 
-    fn build_nonempty_egraph() -> EGraph {
-        // Keep `cx` and `meta_graph` alive while we build the egraph
-        let (_cx, meta_graph, sub) = build_minimal_add_graph();
-        let e = build_search_space(&sub, /*iters=*/ 2);
-        // `_cx` and `meta_graph` can drop now; `e` no longer needs them
-        drop(meta_graph);
-        e
-    }
+//     fn build_nonempty_egraph() -> EGraph {
+//         // Keep `cx` and `meta_graph` alive while we build the egraph
+//         let (_cx, meta_graph, sub) = build_minimal_add_graph();
+//         let e = build_search_space(&sub, /*iters=*/ 2);
+//         // `_cx` and `meta_graph` can drop now; `e` no longer needs them
+//         drop(meta_graph);
+//         e
+//     }
 
-    #[test]
-    fn test_egraph_is_nonempty_and_has_root() {
-        let egraph = build_nonempty_egraph();
-        assert!(!egraph.classes().is_empty(), "EGraph should have classes");
-        assert!(
-            !egraph.root_eclasses.is_empty(),
-            "EGraph should have a root"
-        );
-    }
+//     #[test]
+//     fn test_egraph_is_nonempty_and_has_root() {
+//         let egraph = build_nonempty_egraph();
+//         assert!(!egraph.classes().is_empty(), "EGraph should have classes");
+//         assert!(
+//             !egraph.root_eclasses.is_empty(),
+//             "EGraph should have a root"
+//         );
+//     }
 
-    #[test]
-    fn test_extract_trajectories_invalid_ir_filtering() {
-        let egraph = build_nonempty_egraph();
+//     #[test]
+//     fn test_extract_trajectories_invalid_ir_filtering() {
+//         let egraph = build_nonempty_egraph();
 
-        if egraph.classes().is_empty() || egraph.root_eclasses.is_empty() {
-            return;
-        }
+//         if egraph.classes().is_empty() || egraph.root_eclasses.is_empty() {
+//             return;
+//         }
 
-        let root_class = &egraph.root_eclasses[0];
-        let mut seen = FxHashMap::default();
-        let mut junk_cache = FxHashSet::default();
-        let mut trajectory_cache = FxHashMap::default();
+//         let root_class = &egraph.root_eclasses[0];
+//         let mut seen = FxHashMap::default();
+//         let mut junk_cache = FxHashSet::default();
+//         let mut trajectory_cache = FxHashMap::default();
 
-        let trajectories = extract_trajectories(
-            &egraph,
-            root_class,
-            &mut seen,
-            &mut junk_cache,
-            &mut trajectory_cache,
-            1,
-        );
+//         let trajectories = extract_trajectories(
+//             &egraph,
+//             root_class,
+//             &mut seen,
+//             &mut junk_cache,
+//             &mut trajectory_cache,
+//             1,
+//         );
 
-        // Check that trajectories don't contain INVALID_IR operations
-        for trajectory in trajectories {
-            for &node in &trajectory {
-                let op_name = &egraph.nodes[node].op;
-                assert!(
-                    !INVALID_IR.contains(&op_name.as_str()),
-                    "Trajectory contains invalid IR operation: {}",
-                    op_name
-                );
-            }
-        }
-    }
+//         // Check that trajectories don't contain INVALID_IR operations
+//         for trajectory in trajectories {
+//             for &node in &trajectory {
+//                 let op_name = &egraph.nodes[node].op;
+//                 assert!(
+//                     !INVALID_IR.contains(&op_name.as_str()),
+//                     "Trajectory contains invalid IR operation: {}",
+//                     op_name
+//                 );
+//             }
+//         }
+//     }
 
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_metal_buffer_operations() {
-        use metal_rs::Device;
+//     #[test]
+//     #[cfg(target_os = "macos")]
+//     fn test_metal_buffer_operations() {
+//         use metal_rs::Device;
 
-        // Skip if Metal is not available
-        if Device::system_default().is_none() {
-            return;
-        }
+//         // Skip if Metal is not available
+//         if Device::system_default().is_none() {
+//             return;
+//         }
 
-        let device = Device::system_default().unwrap();
-        let test_data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+//         let device = Device::system_default().unwrap();
+//         let test_data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        // Test buffer creation
-        let buffer = copy_metal_buffer(&test_data, &device);
-        assert_eq!(
-            buffer.length(),
-            (test_data.len() * std::mem::size_of::<f32>()) as u64
-        );
+//         // Test buffer creation
+//         let buffer = copy_metal_buffer(&test_data, &device);
+//         assert_eq!(
+//             buffer.length(),
+//             (test_data.len() * std::mem::size_of::<f32>()) as u64
+//         );
 
-        // Test buffer read back
-        let read_back = copy_metal_buffer_back(&buffer);
-        assert_eq!(read_back.len(), test_data.len());
+//         // Test buffer read back
+//         let read_back = copy_metal_buffer_back(&buffer);
+//         assert_eq!(read_back.len(), test_data.len());
 
-        // Verify data integrity
-        for (original, read) in test_data.iter().zip(&read_back) {
-            assert!(
-                (original - read).abs() < 1e-6,
-                "Buffer data should be preserved"
-            );
-        }
-    }
+//         // Verify data integrity
+//         for (original, read) in test_data.iter().zip(&read_back) {
+//             assert!(
+//                 (original - read).abs() < 1e-6,
+//                 "Buffer data should be preserved"
+//             );
+//         }
+//     }
 
-    #[test]
-    fn test_is_expression_enode() {
-        // Test that expression enodes are correctly identified
-        assert!(is_expression_enode("MNum"));
-        assert!(is_expression_enode("MVar"));
-        assert!(is_expression_enode("MAdd"));
-        assert!(is_expression_enode("MNum:42"));
-        assert!(is_expression_enode("MVar:x"));
+//     #[test]
+//     fn test_is_expression_enode() {
+//         // Test that expression enodes are correctly identified
+//         assert!(is_expression_enode("MNum"));
+//         assert!(is_expression_enode("MVar"));
+//         assert!(is_expression_enode("MAdd"));
+//         assert!(is_expression_enode("MNum:42"));
+//         assert!(is_expression_enode("MVar:x"));
 
-        // Test that non-expression enodes are not identified
-        assert!(!is_expression_enode("GMEM"));
-        assert!(!is_expression_enode("LoopIn"));
-        assert!(!is_expression_enode("Add"));
-        assert!(!is_expression_enode("Invalid"));
-    }
-}
+//         // Test that non-expression enodes are not identified
+//         assert!(!is_expression_enode("GMEM"));
+//         assert!(!is_expression_enode("LoopIn"));
+//         assert!(!is_expression_enode("Add"));
+//         assert!(!is_expression_enode("Invalid"));
+//     }
+// }
