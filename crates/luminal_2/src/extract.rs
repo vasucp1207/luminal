@@ -288,6 +288,7 @@ pub fn search(
         ui_functions = Some(crate::utils::search_ui());
     };
     let mut seen = FxHashSet::default();
+    let mut possibles = 0;
     'trajectory_loop: for (n, trajectory) in trajectories
         .into_iter()
         .take(MAX_SEARCHED_GRAPHS)
@@ -339,14 +340,78 @@ pub fn search(
         else {
             continue;
         };
+        possibles += 1;
         // let inputs = inputs.into_iter().filter_map(|(l, d)| graph.node_indices().find(|n| matches!(graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d.clone()))).collect_vec();
         match &arch {
             GPUArch::CUDA => {
-                if let Some((_, s, _, _)) = &ui_functions {
-                    s(format!(
-                        "Graph {valid_graphs} ({:.1}%) ",
-                        (n as f32 / total_trajectories as f32) * 100.0
-                    ));
+                let k = print_kernels(&kernels);
+                if seen.contains(&k) {
+                    continue;
+                } else {
+                    seen.insert(k);
+                }
+                if let Some((us, outs)) =
+                    cost(&kernels, &node_index_to_init_data, &gmem_mapping, dyn_vars)
+                {
+                    valid_graphs += 1;
+                    if let Some((progress, logs, title, _)) = &ui_functions {
+                        progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
+                        logs(print_kernels(&kernels));
+                        title(format!("Graph {valid_graphs} {us}µs"));
+                    } else if option_env!("DEBUG").is_some() {
+                        println!("{}", print_kernels(&kernels));
+                        println!("Graph {valid_graphs} {us}µs");
+                        if ref_outputs.is_empty() {
+                            ref_outputs = outs;
+                        } else {
+                            for (a, b) in ref_outputs.iter().zip(&outs) {
+                                for (x, y) in a.iter().zip(b) {
+                                    if (x - y).abs() >= 1e-3 {
+                                        if option_env!("DEBUG").is_some() {
+                                            // display_graph(&graph, &[]);
+                                            println!(
+                                                "REF: {:?}",
+                                                &ref_outputs
+                                                    .iter()
+                                                    .map(|v| &v[..v.len().min(20)])
+                                                    .collect_vec()
+                                            );
+                                            println!(
+                                                "New: {:?}",
+                                                &outs
+                                                    .iter()
+                                                    .map(|v| &v[..v.len().min(20)])
+                                                    .collect_vec()
+                                            );
+                                            crate::debug::display_graph(&og, &[]);
+                                            crate::debug::display_graph(&graph, &[]);
+                                            generate_proof(&og, &graph);
+                                            println!("{}", og_kernels);
+                                            println!("{}", print_kernels(&kernels));
+                                            panic!(
+                                                "{} {x} != {y}",
+                                                "Output Mismatch".bold().on_bright_red()
+                                            );
+                                        }
+                                        continue 'trajectory_loop;
+                                    }
+                                }
+                            }
+                            println!("{}", "Outputs Validated".bold().on_bright_green());
+                        }
+                    }
+                    let kernel_string = print_kernels(&kernels);
+                    if og_kernels.is_empty() {
+                        og_kernels = kernel_string.clone();
+                    }
+                    // if kernel_string.len() < fastest.len() || fastest.is_empty() {
+
+                    // }
+                    if us < best_time {
+                        best_time = us;
+                        best_graph = Some(graph);
+                        fastest = kernel_string;
+                    }
                 }
             }
             GPUArch::Metal(_) => {
@@ -426,6 +491,7 @@ pub fn search(
         e();
     }
     println!("FASTEST ({}ms): {fastest}", best_time / 1000);
+    println!("Valids: {:?} / {:?}", possibles, total_trajectories);
     best_graph
 }
 

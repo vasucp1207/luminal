@@ -6,10 +6,13 @@ use crate::{
     extract::{make_test_inputs, search},
     translate::{InitData, OptimalGraphNodeIndex, SubGraphNodeIndex, translate_graph},
 };
-use itertools::Itertools;
-
 #[cfg(feature = "cuda")]
 use cudarc::{driver::*, nvrtc::CompileOptions};
+use itertools::Itertools;
+#[cfg(feature = "cuda")]
+use std::fs::OpenOptions;
+#[cfg(feature = "cuda")]
+use std::io::Write;
 
 use luminal::{
     prelude::{
@@ -244,11 +247,24 @@ pub fn compile_kernels(
 ) -> FxHashMap<String, CudaFunction> {
     let ctx = cudarc::driver::CudaContext::new(0).unwrap();
     let mut compiled = FxHashMap::default();
+
+    // Open (or create) the log file, appending logs to it
+    let log_path = "kernel_log.txt";
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true) // overwrite on each run
+        .open(log_path)
+        .expect("Failed to open kernel log file");
+
     for kernel in kernels.node_weights() {
         if !compiled.contains_key(&kernel.code)
             && kernel.code != "Inputs"
             && kernel.code != "Outputs"
         {
+            writeln!(log_file, "Compiling kernel:\n{}\n", kernel.code)
+                .expect("Failed to write to kernel log file");
+
             let ptx = cudarc::nvrtc::compile_ptx_with_opts(
                 &kernel.code,
                 CompileOptions {
@@ -378,6 +394,7 @@ pub fn run_graph(
             stream.memcpy_htod(&data, dest_buffer).unwrap();
         } else {
             let mut builder = stream.launch_builder(&compiled_kernels[&kernel.code]);
+            println!("Code to run: {}", kernel.code);
 
             // set inputs
             for (input, input_index) in kernels
