@@ -285,21 +285,13 @@
 (ruleset tc)
 (rewrite
 	(LoopIn ; k
-		(LoopIn ; pad2
-			(LoopIn ; pad1
-				(LoopIn ; n
-					(LoopIn ; m
-						?a
-						(Loop ?loop_a_mtile (MNum ?m))
-						(MMul (MVar "z") (MNum ?k))
-					)
-					(Loop ?loop_a_ntile (MNum ?n))
-					(MNum 0)
-				)
-				(Loop ?pad1 (MNum 1))
-				(MNum 0)
+		(LoopIn ; n
+			(LoopIn ; m
+				?a
+				(Loop ?loop_a_mtile (MNum ?m))
+				(MMul (MVar "z") (MNum ?k))
 			)
-			(Loop ?pad2 (MNum 1))
+			(Loop ?loop_a_ntile (MNum ?n))
 			(MNum 0)
 		)
 		(Loop ?loop_a_kouter (MNum ?k))
@@ -311,22 +303,14 @@
 )
 (rewrite
 	(LoopIn ; k
-		(LoopIn ; pad2
-			(LoopIn ; pad1
-				(LoopIn ; n
-					(LoopIn ; m
-						?b
-						(Loop ?loop_b_mtile (MNum ?m))
-						(MNum 0)
-					)
-					(Loop ?loop_b_ntile (MNum ?n))
-					(MVar "z")
-				)
-				(Loop ?pad1 (MNum 1))
+		(LoopIn ; n
+			(LoopIn ; m
+				?b
+				(Loop ?loop_b_mtile (MNum ?m))
 				(MNum 0)
 			)
-			(Loop ?pad2 (MNum 1))
-			(MNum 0)
+			(Loop ?loop_b_ntile (MNum ?n))
+			(MVar "z")
 		)
 		(Loop ?loop_b_kouter (MNum ?k))
 		(MMul (MVar "z") (MNum ?n))
@@ -338,45 +322,29 @@
 (rewrite
 	(LoopOut ; m
 		(LoopOut ; n
-			(LoopOut ; pad1
-				(LoopOut ; pad2
-					 (LoopOut ; k
-						(Add
-							(Mul
-								(TiledMatmulInputA ?a ?k ?k_loops)
-								(TiledMatmulInputB ?b ?n ?k_loops)
-							)
-							; accumulator
-							(LoopIn ; k outer
-								(LoopIn ; pad2
-									(LoopIn ; pad1
-										(LoopIn ; n tile
-											(LoopIn ; m tile
-												?acc
-												(Loop ?loop_acc_mtile (MNum ?m))
-												(MNum 0)
-											)
-											(Loop ?loop_acc_ntile (MNum ?n))
-											(MNum 0)
-										)
-										(Loop ?pad1 (MNum 1))
-										(MNum 0)
-									)
-									(Loop ?pad2 (MNum 1))
-									(MNum 0)
-								)
-								(Loop ?loop_acc_k (MNum ?k))
-								(MAccum ?accum)
-							)
-						)
-						(Loop ?loop_out_k (MNum ?k))
-						(MAccum ?acc_outer)
+			 (LoopOut ; k
+				(Add
+					(Mul
+						(TiledMatmulInputA ?a ?k ?k_loops)
+						(TiledMatmulInputB ?b ?n ?k_loops)
 					)
-					(Loop ?pad2 (MNum 1))
-					(MVar "z")
+					; accumulator
+					(LoopIn ; k outer
+						(LoopIn ; n tile
+							(LoopIn ; m tile
+								?acc
+								(Loop ?loop_acc_mtile (MNum ?m))
+								(MNum 0)
+							)
+							(Loop ?loop_acc_ntile (MNum ?n))
+							(MNum 0)
+						)
+						(Loop ?loop_acc_k (MNum ?k))
+						(MAccum ?accum)
+					)
 				)
-				(Loop ?pad1 (MNum 1))
-				(MVar "z")
+				(Loop ?loop_out_k (MNum ?k))
+				(MAccum ?acc_outer)
 			)
 			(Loop ?loop_out_n (MNum ?n))
 			(MVar "z")
