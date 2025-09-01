@@ -98,7 +98,7 @@
    	(TileLoop IR String) ; Tile a loop, identified by it's string
     (UnpadLoop IR String) ; Remove a padding loop, identified by it's string
     (MergeLoops IR String String) ; Merge loops, identified by their strings
-    (FusedLoops IR) ; Says that we have previously fused a loopout -> loopin here
+    (Fused IR) ; Says that we have previously fused a loopout -> loopin here
 
    	; propogation pattern helpers
    	(PropOneArg String IR String) ; Generic prop one arg back
@@ -172,14 +172,14 @@
 ; Loop Fusion
 (rewrite
 	(LoopIn (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st)
-	(FusedLoops (Binary ?bin ?a ?b))
+	(Fused (Binary ?bin ?a ?b))
 	:ruleset ir
 )
 (rewrite
 	(LoopIn (LoopIn
 		(LoopOut (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2)
 	(Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
-	(FusedLoops (Binary ?bin ?a ?b))
+	(Fused (Binary ?bin ?a ?b))
 	 :ruleset ir
 )
 (rewrite
@@ -188,7 +188,7 @@
 			(Binary ?bin ?a ?b)
 		(Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2) (Loop ?loopA3 ?range3) ?st3)
 	(Loop ?loopB3 ?range3) ?st3) (Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
-	(FusedLoops (Binary ?bin ?a ?b))
+	(Fused (Binary ?bin ?a ?b))
 	:ruleset ir
 )
 
@@ -255,7 +255,7 @@
 		(Loop (+ ?o (+ "merge" ?i)) (MNum (* ?rangeO ?rangeI)))
 		(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") (MNum ?rangeI))) (MReplace ?stI (MVar "z") (MMod (MVar "z") (MNum ?rangeI))))
 	)
-	:when ((set-not-contains (MAccumSet) ?stI))
+	:when ((set-not-contains (MAccumSet) ?stI) (set-not-contains (MAccumSet) ?stO))
 	:ruleset ir
 )
 (rewrite
@@ -342,7 +342,7 @@
 		(LoopOut ; n
 			 (LoopOut ; k
 				(Add
-					(FusedLoops (Mul
+					(Fused (Mul
 						(TiledMatmulInputA ?a ?k ?k_loops)
 						(TiledMatmulInputB ?b ?n ?k_loops)
 					))
@@ -441,35 +441,76 @@
 
 ; Swap loops
 (rewrite
-	(LoopOut (LoopOut ?x (Loop ?innerLoop ?innerRange) ?innerStride) (Loop ?outerLoop ?outerRange) ?outerStride)
-	(LoopOut (LoopOut (SwapLoops ?x ?innerLoop ?outerLoop) (Loop (+ ?outerLoop (+ "sw" ?innerLoop)) ?outerRange) ?outerStride) (Loop (+ ?innerLoop (+ "sw" ?outerLoop)) ?innerRange) ?innerStride)
+	(LoopOut
+		(LoopOut
+			?x
+			(Loop ?innerLoop ?innerRange)
+			?innerStride
+		)
+		(Loop ?outerLoop ?outerRange)
+		?outerStride
+	)
+	(LoopOut
+		(LoopOut
+			(SwapLoops
+				?x
+				?innerLoop
+				?outerLoop
+			)
+			(Loop ?outerLoop ?outerRange)
+			?outerStride
+		)
+		(Loop ?innerLoop ?innerRange)
+		?innerStride
+	)
+	:when ((set-not-contains (MAccumSet) ?innerStride) (!= ?innerLoop ?outerLoop))
 	;:ruleset ir
-	:when ((!= ?innerStride (MAccum "a")))
 )
 (rewrite
-	(SwapLoops (LoopIn (LoopIn ?x (Loop ?outerLoop ?outerRange) ?outerStride) (Loop ?innerLoop ?innerRange) ?innerStride) ?innerLoop ?outerLoop)
-	(LoopIn (LoopIn ?x (Loop (+ ?innerLoop (+ "sw" ?outerLoop)) ?innerRange) ?innerStride) (Loop (+ ?outerLoop (+ "sw" ?innerLoop)) ?outerRange) ?outerStride)
-	:subsume
+	(SwapLoops
+		(LoopIn
+			(LoopIn
+				?x
+				(Loop ?outerLoop ?outerRange)
+				?outerStride
+			)
+			(Loop ?innerLoop ?innerRange)
+			?innerStride
+		)
+		?innerLoop
+		?outerLoop
+	)
+	(LoopIn
+		(LoopIn
+			?x
+			(Loop ?innerLoop ?innerRange)
+			?innerStride
+		)
+		(Loop ?outerLoop ?outerRange)
+		?outerStride
+	)
 	:ruleset ir-prop
 )
 ; propogate
 (rewrite
 	(SwapLoops (LoopOut ?x ?loop ?stride) ?innerLoop ?outerLoop)
 	(LoopOut (SwapLoops ?x ?innerLoop ?outerLoop) ?loop ?stride)
-	:subsume
 	:ruleset ir-prop
 )
 (rewrite
 	(SwapLoops (LoopIn ?x (Loop ?loop ?range) ?stride) ?innerLoop ?outerLoop)
 	(LoopIn (SwapLoops ?x ?innerLoop ?outerLoop) (Loop ?loop ?range) ?stride)
-	:when ((!= ?loop ?outerLoop))
-	:subsume
+	:when ((!= ?loop ?innerLoop))
+	:ruleset ir-prop
+)
+(rewrite
+	(SwapLoops (Unary ?un ?a) ?innerLoop ?outerLoop)
+	(Unary ?un (SwapLoops ?a ?innerLoop ?outerLoop))
 	:ruleset ir-prop
 )
 (rewrite
 	(SwapLoops (Binary ?bin ?a ?b) ?innerLoop ?outerLoop)
 	(Binary ?bin (SwapLoops ?a ?innerLoop ?outerLoop) (SwapLoops ?b ?innerLoop ?outerLoop))
-	:subsume
 	:ruleset ir-prop
 )
 
@@ -477,7 +518,7 @@
 (run-schedule
 	(saturate ir-generic)
 	(saturate expr)
-	(repeat 1
+	(repeat 2
 		(run ir)
 		(saturate ir-prop)
 		(saturate expr)

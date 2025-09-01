@@ -383,7 +383,7 @@ pub fn search(
                                                     .map(|v| &v[..v.len().min(20)])
                                                     .collect_vec()
                                             );
-                                            // generate_proof(&og, &graph);
+                                            // crate::utils::generate_proof(&og, &graph);
                                             println!("{}", og_kernels);
                                             println!("{}", print_kernels(&kernels));
                                             crate::debug::display_multiple_graphs(&[&og, &graph]);
@@ -568,7 +568,7 @@ pub fn extraction_to_graph(
                 g.add_edge(child_one, r, ());
                 Ret::Expr(r)
             }
-            "FusedLoops" => {
+            "Fused" => {
                 *current += 1;
                 let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
                     panic!()
