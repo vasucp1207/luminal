@@ -5,6 +5,7 @@ use eframe::{
     egui::{Color32, Pos2, Vec2},
 };
 use egglog::Term;
+use egui::ViewportId;
 use itertools::Itertools;
 use luminal::{
     prelude::petgraph::{Directed, Direction, graph::NodeIndex, prelude::StableGraph},
@@ -28,21 +29,48 @@ pub enum DisplayMode {
     LoopLevel,
 }
 
-type DisplayNode = (String, egui::Color32, NodeShape, Option<usize>);
-type DisplayGraph = StableGraph<DisplayNode, ()>;
+pub type DisplayNode = (String, egui::Color32, NodeShape, Option<usize>);
+pub type DisplayGraph = StableGraph<DisplayNode, ()>;
 
-pub fn display_graph(
-    graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>,
-    mark_nodes: &[(NodeIndex, Color32)],
+pub fn display_graph(graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>) {
+    display_multiple_graphs(&[graph]);
+}
+
+pub fn display_multiple_graphs<T: TermToString, E: EdgeToString>(
+    graphs: &[&StableGraph<T, E, Directed, u32>],
 ) {
-    // Convert graph into a displayable graph
-    let mut display_graph = DisplayGraph::new();
+    // Build independent display graphs/views
+    let views: Vec<View> = graphs
+        .iter()
+        .map(|g| View::new(to_display_graph(g, &[])))
+        .collect();
+
+    let _ = eframe::run_native(
+        "Luminal Debugger",
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([if graphs.len() == 1 { 1000.0 } else { 2000.0 }, 1200.0])
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_close_button(true),
+            ..Default::default()
+        },
+        Box::new(move |_cc| Ok(Box::new(Debugger::new(views)))),
+    );
+}
+
+fn to_display_graph<T: TermToString, E: EdgeToString>(
+    graph: &StableGraph<T, E, Directed, u32>,
+    mark_nodes: &[(NodeIndex, Color32)],
+) -> DisplayGraph {
+    // 1) copy nodes/edges
+    let mut dg = DisplayGraph::new();
     let mut map = FxHashMap::default();
     for node in graph.node_indices() {
         let (r, c, b) = graph.node_weight(node).unwrap().term_to_string();
         map.insert(
             node,
-            display_graph.add_node(
+            dg.add_node(
                 if let Some((_, color)) = mark_nodes.iter().find(|(i, _)| *i == node) {
                     (r, *color, b, None)
                 } else {
@@ -51,78 +79,71 @@ pub fn display_graph(
             ),
         );
     }
-    for edge in graph.edge_indices() {
-        let (start, end) = graph.edge_endpoints(edge).unwrap();
-        display_graph.add_edge(map[&start], map[&end], ());
+    for e in graph.edge_indices() {
+        let (u, v) = graph.edge_endpoints(e).unwrap();
+        dg.add_edge(map[&u], map[&v], ());
     }
 
-    // derive loop levels
-    let mut seen = display_graph
+    // 2) derive loop levels
+    let mut seen = dg
         .externals(Direction::Incoming)
-        .chain(graph.externals(Direction::Outgoing))
+        .chain(dg.externals(Direction::Outgoing))
         .collect::<FxHashSet<_>>();
+    for n in &seen {
+        if dg[*n].0.contains("LoopOut") {
+            dg.node_weight_mut(*n).unwrap().3 = Some(0);
+        }
+    }
+
     let mut dfs = seen
         .iter()
-        .flat_map(|n| display_graph.neighbors_directed(*n, Direction::Incoming))
+        .flat_map(|n| dg.neighbors_directed(*n, Direction::Incoming))
         .collect_vec();
+
     while let Some(n) = dfs.pop() {
         if seen.contains(&n) {
             continue;
         }
         seen.insert(n);
-        let curr_term = display_graph[n].0.clone();
-        if let Some(outgoing_neighbor) = display_graph
+        let curr_term = dg[n].0.clone();
+
+        if let Some(outgoing_neighbor) = dg
             .neighbors_directed(n, Direction::Outgoing)
-            .find(|n| seen.contains(n))
+            .find(|x| seen.contains(x))
         {
-            // Base level off outgoing neighbor
-            let (neighbor_weight, _, _, mut neighbor_levels) =
-                display_graph[outgoing_neighbor].clone();
+            let (neighbor_weight, _, _, mut neighbor_levels) = dg[outgoing_neighbor].clone();
             if neighbor_weight.contains("LoopOut") {
                 neighbor_levels = Some(neighbor_levels.unwrap_or_default() + 1);
             }
             if curr_term.contains("LoopIn") {
                 neighbor_levels = neighbor_levels.map(|i| i - 1);
             }
-            display_graph.node_weight_mut(n).unwrap().3 = neighbor_levels;
-        } else if let Some(incoming_neighbor) = display_graph
+            dg.node_weight_mut(n).unwrap().3 = neighbor_levels;
+        } else if let Some(incoming_neighbor) = dg
             .neighbors_directed(n, Direction::Incoming)
-            .find(|n| seen.contains(n))
+            .find(|x| seen.contains(x))
         {
-            // Base level off incoming neighbor
-            let (neighbor_weight, _, _, mut neighbor_levels) =
-                display_graph[incoming_neighbor].clone();
+            let (neighbor_weight, _, _, mut neighbor_levels) = dg[incoming_neighbor].clone();
             if neighbor_weight.contains("LoopIn") {
                 neighbor_levels = Some(neighbor_levels.unwrap_or_default() + 1);
             }
             if curr_term.contains("LoopOut") {
                 neighbor_levels = neighbor_levels.map(|i| i - 1);
             }
-            display_graph.node_weight_mut(n).unwrap().3 = neighbor_levels;
-        } else {
-            panic!("No seen neighbors when building loop levels!");
+            dg.node_weight_mut(n).unwrap().3 = neighbor_levels;
         }
-        dfs.extend(display_graph.neighbors_undirected(n));
+        dfs.extend(dg.neighbors_undirected(n));
     }
-    // remove loop levels for non loopins and loopouts
-    for (w, _, _, l) in display_graph.node_weights_mut() {
+    for (w, _, _, l) in dg.node_weights_mut() {
         if !w.contains("LoopIn") && !w.contains("LoopOut") {
             *l = None;
         }
     }
 
-    eframe::run_native(
-        "Luminal Debugger",
-        eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1000 as f32, 1200 as f32]),
-            ..Default::default()
-        },
-        Box::new(|_cc| Ok(Box::new(Debugger::new(display_graph)))),
-    )
-    .unwrap();
+    dg
 }
 
-struct Debugger {
+pub struct View {
     g: DisplayGraph,
     pos: Vec<Pos2>,
     dragging: Option<usize>,
@@ -130,8 +151,406 @@ struct Debugger {
     need_fit: bool,
 }
 
+impl View {
+    pub fn new(g: DisplayGraph) -> Self {
+        Self {
+            pos: layered_layout(&g, 140.0, 120.0, 100.0),
+            g,
+            dragging: None,
+            cam: Camera::new(),
+            need_fit: true,
+        }
+    }
+}
+
+pub struct Debugger {
+    views: Vec<View>,
+    should_close: bool,
+}
+
+impl Debugger {
+    pub fn new(views: Vec<View>) -> Self {
+        Self {
+            views,
+            should_close: false,
+        }
+    }
+}
+
+impl Debugger {
+    fn setup_visuals_and_background(&self, ctx: &egui::Context) {
+        // Make panels/windows transparent so rounded bg shows through
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = Color32::TRANSPARENT;
+        visuals.window_fill = Color32::TRANSPARENT;
+        ctx.set_visuals(visuals);
+
+        // Rounded background behind everything
+        let screen = ctx.screen_rect();
+        let rounding = egui::Rounding::same(9.0); // corner radius
+        let bg = Color32::from_rgb(12, 12, 12);
+        let bg_painter = ctx.layer_painter(egui::LayerId::background());
+        // shrink a hair to avoid clipping the antialiased edge
+        bg_painter.rect_filled(screen.shrink(0.5), rounding, bg);
+    }
+
+    fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        // Global 'D' toggles display mode for all views
+        if ctx.input(|i| i.key_pressed(egui::Key::D)) {
+            for v in &mut self.views {
+                v.cam.toggle_mode();
+            }
+            ctx.request_repaint();
+        }
+
+        // quit on Ctrl+Q
+        if ctx.input(|i| i.key_pressed(egui::Key::Q) && (i.modifiers.ctrl || i.modifiers.command)) {
+            self.should_close = true;
+        }
+
+        // Handle close requests
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.should_close = true;
+        }
+
+        if self.should_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn draw_title_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        pad: f32,
+    ) {
+        // --- mac "traffic lights" ---
+        let r = 6.0;
+        let gap = 8.0;
+        let cy = rect.center().y;
+        let cx0 = rect.left() + pad + r;
+
+        let centers = [
+            Pos2::new(cx0 + 0.0 * (2.0 * r + gap), cy), // close
+            Pos2::new(cx0 + 1.0 * (2.0 * r + gap), cy), // minimize
+            Pos2::new(cx0 + 2.0 * (2.0 * r + gap), cy), // fullscreen
+        ];
+        let colors = [
+            Color32::from_rgb(255, 95, 86),  // red
+            Color32::from_rgb(255, 189, 46), // yellow
+            Color32::from_rgb(39, 201, 63),  // green
+        ];
+
+        for (i, c) in centers.iter().enumerate() {
+            // base circle
+            painter.circle_filled(*c, r, colors[i]);
+
+            // hit area & interaction
+            let hit = egui::Rect::from_center_size(*c, egui::vec2(2.0 * r + 6.0, 2.0 * r + 6.0));
+            let id = ui.make_persistent_id(("title_btn", i));
+            let resp = ui
+                .interact(hit, id, egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+            // mac-style icon appears on hover (animated)
+            let t = ui.ctx().animate_bool(id.with("hover"), resp.hovered()); // 0..1
+            let icon_alpha = ((t * 255.0).round() as u8).min(255);
+            let icon_color = Color32::from_white_alpha(icon_alpha);
+
+            // optional hover ring
+            if t > 0.0 {
+                painter.circle_stroke(*c, r + 1.5, egui::Stroke::new(1.0 * t, icon_color));
+            }
+
+            // pick the glyph like macOS
+            let glyph = match i {
+                0 => "×", // close
+                1 => "–", // minimize
+                2 => "⤢", // fullscreen (diagonal arrows)
+                _ => "",
+            };
+
+            // draw glyph centered in the circle
+            painter.text(
+                *c,
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(10.0),
+                icon_color,
+            );
+
+            // click behavior
+            if resp.clicked() {
+                match i {
+                    0 => {
+                        // hide instantly
+                        ctx.send_viewport_cmd_to(
+                            ViewportId::ROOT,
+                            egui::ViewportCommand::Visible(false),
+                        );
+                        // then actually close on the next pump
+                        ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Close);
+                        // ensure we process it ASAP
+                        ctx.request_repaint();
+                    }
+                    1 => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                    2 => ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                        !ctx.input(|inp| inp.viewport().fullscreen.unwrap_or(false)),
+                    )),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn draw_title_bar(&mut self, ctx: &egui::Context) {
+        const BAR_H: f32 = 36.0;
+        const PAD: f32 = 10.0;
+
+        egui::TopBottomPanel::top("custom_title_bar")
+            .exact_height(BAR_H)
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                let mut rect = ui.max_rect();
+                // avoid painting outside the rounded window edge
+                rect = rect.shrink(0.5);
+
+                let painter = ui.painter_at(rect);
+                let top_round = egui::Rounding {
+                    nw: 9.0,
+                    ne: 9.0,
+                    se: 0.0,
+                    sw: 0.0,
+                };
+
+                // single fill with rounded top corners
+                painter.rect_filled(rect, top_round, Color32::from_rgb(34, 197, 94));
+
+                self.draw_title_buttons(ui, ctx, &painter, rect, PAD);
+
+                // --- drag anywhere on the bar except over the buttons ---
+                let r = 6.0;
+                let gap = 8.0;
+                let drag_rect = rect.shrink2(egui::vec2(PAD + 3.0 * (2.0 * r + gap), 0.0));
+                let drag_resp = ui.interact(
+                    drag_rect,
+                    ui.make_persistent_id("title_drag"),
+                    egui::Sense::drag(),
+                );
+                if drag_resp.drag_started()
+                    || (drag_resp.is_pointer_button_down_on() && drag_resp.hovered())
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // centered title
+                let title = "Luminal Debugger";
+                painter.text(
+                    Pos2::new(rect.center().x, rect.center().y),
+                    egui::Align2::CENTER_CENTER,
+                    title,
+                    egui::FontId::new(14.0, egui::FontFamily::Monospace),
+                    Color32::BLACK,
+                );
+            });
+    }
+
+    fn draw_top_panel(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("top_multi").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Pan: drag/bg scroll • Zoom: ⌘/Ctrl+wheel or pinch • Toggle mode: D");
+                if ui.button("Fit all").clicked() {
+                    for v in &mut self.views {
+                        v.need_fit = true;
+                    }
+                }
+                ui.separator();
+                for (i, v) in self.views.iter().enumerate() {
+                    ui.label(format!(
+                        "View {i}: {:.1}x {:?}",
+                        v.cam.zoom, v.cam.display_mode
+                    ));
+                }
+            });
+        });
+    }
+
+    fn handle_view_input(
+        view: &mut View,
+        ui_col: &mut egui::Ui,
+        resp: &egui::Response,
+        origin: Pos2,
+    ) {
+        // Read input (global), then gate by hovered/active
+        let (mods, raw_scroll, pinch, pointer, drag_delta) = ui_col.input(|inp| {
+            (
+                inp.modifiers,
+                inp.raw_scroll_delta,
+                inp.zoom_delta_2d(),
+                inp.pointer.clone(),
+                inp.pointer.delta(),
+            )
+        });
+        let hovered = resp.hovered();
+        let active = hovered || view.dragging.is_some();
+
+        // Zoom: only when hovered/active and cursor inside this rect
+        if active {
+            let do_pinch = (pinch.y - 1.0).abs() > 1e-3 && hovered;
+            let do_wheel_zoom = hovered && (mods.command || mods.ctrl) && raw_scroll.y != 0.0;
+
+            if do_pinch || do_wheel_zoom {
+                if let Some(cursor) = pointer.hover_pos() {
+                    if resp.rect.contains(cursor) {
+                        let factor = if do_pinch {
+                            pinch.y
+                        } else {
+                            (raw_scroll.y * -0.001).exp()
+                        };
+                        view.cam.zoom_at(origin, cursor, factor);
+                        ui_col.ctx().request_repaint();
+                    }
+                }
+            } else if hovered && raw_scroll != Vec2::ZERO {
+                // Trackpad/mouse scroll pans only when hovered
+                view.cam.pan += raw_scroll;
+            }
+        }
+
+        // Dragging: start only on this column; continue while pressed even if cursor leaves
+        if active {
+            if let Some(pos) = pointer.interact_pos() {
+                let pos_in_this = resp.rect.contains(pos);
+
+                if hovered && pointer.primary_pressed() && view.dragging.is_none() {
+                    let pick_r2 = 16.0 * 16.0;
+                    view.dragging = view
+                        .pos
+                        .iter()
+                        .enumerate()
+                        .map(|(j, &w)| (j, view.cam.w2s(origin, w).distance_sq(pos)))
+                        .filter(|&(_, d2)| d2 <= pick_r2)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(j, _)| j);
+                }
+
+                if pointer.primary_down() && (view.dragging.is_some() || pos_in_this) {
+                    if let Some(j) = view.dragging {
+                        view.pos[j] = view.cam.s2w(origin, pos);
+                    } else if hovered {
+                        view.cam.pan += drag_delta;
+                    }
+                } else if pointer.primary_released() {
+                    view.dragging = None;
+                }
+            }
+        }
+    }
+
+    fn render_view(view: &View, painter: &egui::Painter, origin: Pos2) {
+        let z = view.cam.zoom;
+        let node_r = (14.0 * z).clamp(6.0, 40.0);
+        let label_dy = 22.0 * z;
+        let font_px = (14.0 * z).clamp(9.0, 48.0);
+        let font_id = egui::FontId::monospace(font_px);
+
+        // Draw edges
+        for e in view.g.edge_indices() {
+            let (u, w) = view.g.edge_endpoints(e).unwrap();
+            let pu = view.cam.w2s(origin, view.pos[u.index()]);
+            let pw = view.cam.w2s(origin, view.pos[w.index()]);
+            draw_arrow(painter, pu, pw, z, Color32::DARK_GRAY);
+        }
+
+        // Draw nodes
+        for nidx in view.g.node_indices() {
+            let p = view.cam.w2s(origin, view.pos[nidx.index()]);
+            let (label, _, _, _) = &view.g[nidx];
+            draw_node(painter, p, node_r, &view.g[nidx], view.cam.display_mode);
+            painter.text(
+                p + Vec2::new(0.0, -label_dy),
+                egui::Align2::CENTER_CENTER,
+                label,
+                font_id.clone(),
+                Color32::WHITE,
+            );
+        }
+    }
+
+    fn draw_central_panel(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let n = self.views.len().max(1);
+            ui.columns(n, |cols| {
+                for i in 0..n {
+                    let ui_col = &mut cols[i];
+
+                    // Stable painter per column
+                    let viewport = ui_col.available_size();
+                    let (resp, painter) =
+                        ui_col.allocate_painter(viewport, egui::Sense::click_and_drag());
+                    let origin = resp.rect.min;
+
+                    // Fit per view
+                    let view = &mut self.views[i];
+                    if view.need_fit {
+                        let (min_w, max_w) = world_bounds(
+                            ui_col,
+                            &view.g,
+                            &view.pos,
+                            &egui::FontId::proportional(14.0),
+                        );
+                        if min_w.x.is_finite() {
+                            view.cam.fit(origin, viewport, min_w, max_w, 40.0);
+                        }
+                        view.need_fit = false;
+                    }
+
+                    // Handle input
+                    Self::handle_view_input(view, ui_col, &resp, origin);
+
+                    // Render view
+                    Self::render_view(view, &painter, origin);
+
+                    // Draw divider between views
+                    if n > 1 && i < n - 1 {
+                        let rect = resp.rect;
+                        let right_edge = rect.right_center();
+                        painter.line_segment(
+                            [
+                                right_edge - egui::vec2(0.0, rect.height() / 2.0),
+                                right_edge + egui::vec2(0.0, rect.height() / 2.0),
+                            ],
+                            egui::Stroke::new(3.0, Color32::from_rgb(34, 197, 94)),
+                        );
+                    }
+                }
+            });
+        });
+    }
+}
+
+impl eframe::App for Debugger {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.setup_visuals_and_background(ctx);
+        self.handle_global_shortcuts(ctx);
+        if self.should_close || ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.draw_title_bar(ctx);
+        self.draw_top_panel(ctx);
+        self.draw_central_panel(ctx);
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Rgba::TRANSPARENT.to_array()
+    }
+}
+
 #[derive(Clone, Copy)]
-struct Camera {
+pub struct Camera {
     zoom: f32, // scale
     pan: Vec2, // screen px offset
     display_mode: DisplayMode,
@@ -160,16 +579,30 @@ impl Camera {
         self.pan = (cursor - origin) - world_before.to_vec2() * new_zoom;
         self.zoom = new_zoom;
     }
-    fn fit(&mut self, origin: Pos2, viewport: Vec2, world_min: Pos2, world_max: Pos2, margin: f32) {
+    fn fit(
+        &mut self,
+        _origin: Pos2,
+        viewport: Vec2,
+        world_min: Pos2,
+        world_max: Pos2,
+        margin: f32,
+    ) {
+        // world extents
         let size_w = (world_max - world_min).max(Vec2::splat(1.0));
+        // usable viewport *in local coords* (no origin baked in)
         let usable = (viewport - Vec2::splat(2.0 * margin)).max(Vec2::splat(1.0));
+
         self.zoom = (usable.x / size_w.x)
             .min(usable.y / size_w.y)
             .clamp(0.1, 10.0);
-        let mapped_min = origin + Vec2::splat(margin);
+
+        // Map world_min -> margin, then center any extra space. Stay in local coords.
+        let mapped_min_local = Vec2::splat(margin);
         let mapped_size = size_w * self.zoom;
         let extra = (usable - mapped_size).max(Vec2::ZERO) * 0.5;
-        self.pan = ((mapped_min + extra) - world_min.to_vec2() * self.zoom).to_vec2();
+
+        // IMPORTANT: no origin here. w2s will add origin later.
+        self.pan = mapped_min_local + extra - world_min.to_vec2() * self.zoom;
     }
     #[inline]
     fn toggle_mode(&mut self) {
@@ -177,139 +610,6 @@ impl Camera {
             DisplayMode::TermType => DisplayMode::LoopLevel,
             DisplayMode::LoopLevel => DisplayMode::TermType,
         };
-    }
-}
-
-impl Debugger {
-    fn new(g: DisplayGraph) -> Self {
-        Self {
-            pos: layered_layout(&g, 140.0, 120.0, 100.0),
-            g,
-            dragging: None,
-            cam: Camera::new(),
-            need_fit: true,
-        }
-    }
-}
-
-impl eframe::App for Debugger {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // global key handling
-        if ctx.input(|i| i.key_pressed(egui::Key::D)) {
-            self.cam.toggle_mode();
-            ctx.request_repaint();
-        }
-
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Drag nodes. Drag background / two-finger scroll to pan. ⌘/Ctrl+wheel or pinch to zoom. Press 'D' to toggle display.");
-                if ui.button("Fit").clicked() { self.need_fit = true; }
-                ui.label(format!("Zoom: {:.1}x", self.cam.zoom));
-                ui.separator();
-                ui.label(match self.cam.display_mode {
-                    DisplayMode::TermType => "Mode: TermType",
-                    DisplayMode::LoopLevel => "Mode: LoopLevel",
-                });
-            });
-        });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Stable viewport-sized painter
-            let viewport = ui.available_size();
-            let (resp, painter) = ui.allocate_painter(viewport, egui::Sense::click_and_drag());
-            let origin = resp.rect.min;
-
-            // Fit once (or after button)
-            if self.need_fit {
-                let (min_w, max_w) =
-                    world_bounds(ui, &self.g, &self.pos, &egui::FontId::proportional(14.0));
-                if min_w.x.is_finite() {
-                    self.cam.fit(origin, viewport, min_w, max_w, 40.0);
-                }
-                self.need_fit = false;
-            }
-
-            // --- Input handling ---
-            let (mods, raw_scroll, pinch, pointer, drag_delta) = ui.input(|i| {
-                (
-                    i.modifiers,
-                    i.raw_scroll_delta,
-                    i.zoom_delta_2d(),
-                    i.pointer.clone(),
-                    i.pointer.delta(),
-                )
-            });
-
-            // Zoom (pinch or Cmd/Ctrl + wheel), anchored at cursor (fallback to center)
-            let do_pinch = (pinch.y - 1.0).abs() > 1e-3;
-            let do_wheel_zoom = (mods.command || mods.ctrl) && raw_scroll.y != 0.0;
-            if do_pinch || do_wheel_zoom {
-                let cursor = pointer.hover_pos().unwrap_or(resp.rect.center());
-                let factor = if do_pinch {
-                    pinch.y
-                } else {
-                    (raw_scroll.y * -0.001).exp()
-                };
-                self.cam.zoom_at(origin, cursor, factor);
-                ui.ctx().request_repaint();
-            } else if raw_scroll != Vec2::ZERO {
-                // Trackpad scroll pans when not zooming
-                self.cam.pan += raw_scroll;
-            }
-
-            // Node picking/dragging or background pan drag
-            if let Some(pos) = pointer.interact_pos() {
-                if pointer.primary_pressed() && self.dragging.is_none() {
-                    let pick_r2 = 16.0 * 16.0;
-                    self.dragging = self
-                        .pos
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &w)| (i, self.cam.w2s(origin, w).distance_sq(pos)))
-                        .filter(|&(_, d2)| d2 <= pick_r2)
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .map(|(i, _)| i);
-                }
-                if pointer.primary_down() {
-                    if let Some(i) = self.dragging {
-                        self.pos[i] = self.cam.s2w(origin, pos);
-                    } else {
-                        self.cam.pan += drag_delta;
-                    }
-                } else if pointer.primary_released() {
-                    self.dragging = None;
-                }
-            }
-
-            // --- Drawing ---
-            let z = self.cam.zoom;
-            let node_r = (14.0 * z).clamp(6.0, 40.0);
-            let label_dy = 22.0 * z;
-            let font_px = (14.0 * z).clamp(9.0, 48.0);
-
-            // edges
-            for e in self.g.edge_indices() {
-                let (u, v) = self.g.edge_endpoints(e).unwrap();
-                let pu = self.cam.w2s(origin, self.pos[u.index()]);
-                let pv = self.cam.w2s(origin, self.pos[v.index()]);
-                draw_arrow(&painter, pu, pv, z, Color32::DARK_GRAY);
-            }
-
-            // nodes + labels
-            let font_id = egui::FontId::proportional(font_px);
-            for n in self.g.node_indices() {
-                let p = self.cam.w2s(origin, self.pos[n.index()]);
-                let (label, _, _, _) = &self.g[n];
-                draw_node(&painter, p, node_r, &self.g[n], self.cam.display_mode);
-                painter.text(
-                    p + Vec2::new(0.0, -label_dy),
-                    egui::Align2::CENTER_CENTER,
-                    label,
-                    font_id.clone(),
-                    Color32::WHITE,
-                );
-            }
-        });
     }
 }
 
@@ -439,47 +739,74 @@ fn world_bounds(
 /// Simple layered DAG layout
 fn layered_layout(g: &DisplayGraph, dx: f32, layer_dy: f32, layer_cx: f32) -> Vec<Pos2> {
     use std::collections::VecDeque;
+
     let n = g.node_count();
-    let mut indeg = vec![0usize; n];
-    for ni in g.node_indices() {
-        indeg[ni.index()] = g.neighbors_directed(ni, Direction::Incoming).count();
+    if n == 0 {
+        return vec![];
     }
+
+    // 1) Compute depth from sinks upward: sink=0, parent=child+1
+    let mut depth = vec![usize::MAX; n];
     let mut q = VecDeque::new();
-    for ni in g.node_indices() {
-        if indeg[ni.index()] == 0 {
-            q.push_back(ni);
+    for u in g.node_indices() {
+        if g.neighbors_directed(u, Direction::Outgoing)
+            .next()
+            .is_none()
+        {
+            depth[u.index()] = 0;
+            q.push_back(u);
         }
     }
-    let mut order = Vec::with_capacity(n);
-    while let Some(u) = q.pop_front() {
-        order.push(u);
-        for v in g.neighbors_directed(u, Direction::Outgoing) {
-            let i = v.index();
-            indeg[i] -= 1;
-            if indeg[i] == 0 {
-                q.push_back(v);
+    if q.is_empty() {
+        if let Some(u) = g.node_indices().next() {
+            depth[u.index()] = 0;
+            q.push_back(u);
+        }
+    }
+    while let Some(child) = q.pop_front() {
+        let cd = depth[child.index()];
+        for parent in g.neighbors_directed(child, Direction::Incoming) {
+            let want = cd + 1;
+            if depth[parent.index()] == usize::MAX || depth[parent.index()] < want {
+                depth[parent.index()] = want;
+                q.push_back(parent);
             }
         }
     }
-    let mut depth = vec![0usize; n];
-    for &u in &order {
-        let du = depth[u.index()];
-        for v in g.neighbors_directed(u, Direction::Outgoing) {
-            depth[v.index()] = depth[v.index()].max(du + 1);
+    // Any leftover (disconnected) → one row above current top so they end up at the very top after flip
+    let max_seen = depth
+        .iter()
+        .filter(|d| **d != usize::MAX)
+        .copied()
+        .max()
+        .unwrap_or(0);
+    for u in g.node_indices() {
+        if depth[u.index()] == usize::MAX {
+            depth[u.index()] = max_seen + 1;
         }
     }
-    let max_d = depth.iter().copied().max().unwrap_or(0);
+
+    // 2) Flip so layout flows top→bottom (inputs at top, outputs at bottom)
+    let max_d = *depth.iter().max().unwrap();
+    let layer_of = |u: NodeIndex| max_d - depth[u.index()];
+
+    // 3) Bucket by flipped layer (stable)
     let mut by_layer: Vec<Vec<NodeIndex>> = vec![vec![]; max_d + 1];
-    for ni in g.node_indices() {
-        by_layer[depth[ni.index()]].push(ni);
+    for u in g.node_indices() {
+        by_layer[layer_of(u)].push(u);
     }
+    for layer in &mut by_layer {
+        layer.sort_by_key(|u| u.index());
+    }
+
+    // 4) Place nodes
     let mut pos = vec![Pos2::ZERO; n];
     for (layer, nodes) in by_layer.into_iter().enumerate() {
         let w = (nodes.len().saturating_sub(1)) as f32 * dx;
-        for (k, ni) in nodes.into_iter().enumerate() {
+        let y = (layer as f32) * layer_dy + 80.0;
+        for (k, u) in nodes.into_iter().enumerate() {
             let x = (k as f32) * dx - w * 0.5 + layer_cx;
-            let y = layer as f32 * layer_dy + 80.0;
-            pos[ni.index()] = Pos2::new(x, y);
+            pos[u.index()] = Pos2::new(x, y);
         }
     }
     pos
@@ -606,13 +933,21 @@ impl TermToString for GraphTerm {
                 Color32::RED,
                 NodeShape::Circle,
             ),
-            GraphTerm::LoopIn { range, stride, .. } => (
-                format!("LoopIn ({range}; {stride})"),
+            GraphTerm::LoopIn {
+                range,
+                stride,
+                marker,
+            } => (
+                format!("LoopIn ({range}; {stride}; ({marker}))"),
                 Color32::LIGHT_BLUE,
                 NodeShape::InvertedTriangle,
             ),
-            GraphTerm::LoopOut { range, stride, .. } => (
-                format!("LoopOut ({range}; {stride})"),
+            GraphTerm::LoopOut {
+                range,
+                stride,
+                marker,
+            } => (
+                format!("LoopOut ({range}; {stride}; ({marker}))"),
                 Color32::BLUE,
                 NodeShape::Triangle,
             ),

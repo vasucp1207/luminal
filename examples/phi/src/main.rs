@@ -1,3 +1,5 @@
+#![allow(unreachable_code)]
+
 use std::{
     io::{self, Write},
     time::Instant,

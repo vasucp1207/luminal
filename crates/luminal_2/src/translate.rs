@@ -167,7 +167,7 @@ pub fn translate_graph(
                     g.add_edge(base0, r, ());
                     r
                 };
-                out = scope_out(out, ranges, false, &mut g);
+                out = scope_out(out, ranges, None, &mut g);
                 key_to_subgraph_buffer.insert(old_node, out);
                 orig_to_subgraph_node_map.insert((old_node, 0), out);
             }
@@ -206,7 +206,7 @@ pub fn translate_graph(
                 });
                 g.add_edge(ain, opn, ());
                 g.add_edge(bin, opn, ());
-                opn = scope_out(opn, ranges, false, &mut g);
+                opn = scope_out(opn, ranges, None, &mut g);
                 key_to_subgraph_buffer.insert(old_node, opn);
                 orig_to_subgraph_node_map.insert((old_node, 0), opn);
             }
@@ -254,7 +254,7 @@ pub fn translate_graph(
                     .collect::<Vec<_>>();
                 rm_strides.reverse();
                 for (i, ((range, name), acc_stride)) in ranges.iter().zip(rm_strides).enumerate() {
-                    let stride = if i == GRID_DIMS + THREADBLOCK_DIMS {
+                    let stride = if i == reduce_dim {
                         Expression::from(Term::Acc('a'))
                     } else if i > GRID_DIMS + THREADBLOCK_DIMS {
                         Expression::from('z') * acc_stride
@@ -276,7 +276,7 @@ pub fn translate_graph(
                 let mut opn = g.add_node(term);
                 g.add_edge(new_source, opn, ());
                 g.add_edge(acc, opn, ());
-                opn = scope_out(opn, ranges, true, &mut g);
+                opn = scope_out(opn, ranges, Some(reduce_dim), &mut g);
                 key_to_subgraph_buffer.insert(old_node, opn);
                 orig_to_subgraph_node_map.insert((old_node, 0), opn);
             }
@@ -289,7 +289,6 @@ pub fn translate_graph(
                     });
                     key_to_subgraph_buffer.insert(old_node, newn);
                     orig_to_subgraph_node_map.insert((old_node, 0), newn);
-                    println!("CONSTANT OLD: {old_node:?} NEW: {:?}", newn);
                     key_to_subgraph_buffer
                         .insert(NodeIndex::new(graph.node_count() + inits.len()), newn);
                     inits.push((
@@ -369,15 +368,15 @@ fn scope_in(
         let mut stride = strides[i] * 'z';
         let (left_pad, right_pad) = shape.padding[shape.indexes[i]];
         let (left_slice, right_slice) = shape.mask[shape.indexes[i]];
-        if reduce_dim.map(|d| d == i).unwrap_or_default() {
+        if reduce_dim == Some(i) {
             assert!(
                 left_pad == 0 && right_pad == 0,
                 "pad on a reduce dim not implemented!"
             );
-            for z in i..THREADBLOCK_DIMS + GRID_DIMS {
-                ranges.push((Expression::from(1), format!("pad{z}")));
-                src = loop_in(src, 1, 0, format!("pad{z}"), graph);
-            }
+            // for z in i..THREADBLOCK_DIMS + GRID_DIMS {
+            //     ranges.push((Expression::from(1), format!("pad{z}")));
+            //     src = loop_in(src, 1, 0, format!("pad{z}"), graph);
+            // }
             ranges.push((range, i.to_string()));
             src = loop_in(
                 src,
@@ -511,13 +510,13 @@ fn scope_in(
 fn scope_out(
     mut src: NodeIndex,
     ranges: Vec<(Expression, String)>,
-    reduce: bool,
+    reduce: Option<usize>,
     graph: &mut StableGraph<GraphTerm, (), Directed>,
 ) -> NodeIndex {
     for (stride, range, loop_name) in ranges.into_iter().enumerate().rev().scan(
         Expression::from('z'),
         |i, (ind, (range, loop_name))| {
-            if reduce && ind == THREADBLOCK_DIMS + GRID_DIMS {
+            if reduce == Some(ind) {
                 Some((Expression::from(Term::Acc('a')), range, loop_name)) // THIS IS WRONG, IT SHOULD MIRROR THE INCOMING ACC AND BE RANDOMLY GENERATED
             } else {
                 let r = *i;

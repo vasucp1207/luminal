@@ -8,8 +8,8 @@ use luminal::prelude::{
     *,
 };
 use luminal_2::{
+    autoreleasepool,
     codegen::{codegen, stitch_meta_graph_together},
-    debug::display_graph,
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
@@ -41,7 +41,6 @@ fn main() {
     with_autoreleasepool(|| {
         #[cfg(feature = "cuda")]
         println!("CUDA MODE ENABLED");
-
         #[allow(non_snake_case)]
         let (M, K, N) = (512, 512, 512);
         let mut cx = Graph::new();
@@ -52,7 +51,7 @@ fn main() {
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            // display_graph(&graph, &[]);
+            // luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
             #[cfg(feature = "metal")]
             let arch = GPUArch::Metal(HashMap::default());
@@ -123,12 +122,11 @@ fn main() {
             unified_map.insert(k, meta_to_final[&v]);
         }
         let (kernels, gmem_mapping) = codegen(
-            graph,
+            graph.clone(),
             outputs,
             GPUArch::Metal(HashMap::default()),
             0,
             &HashMap::default(),
-            false,
         )
         .unwrap();
 
@@ -167,6 +165,7 @@ fn main() {
         }
 
         let (outputs, _) = run_graph(
+            &graph,
             &mut inputs,
             &kernels,
             &FxHashMap::default(),
@@ -176,7 +175,6 @@ fn main() {
         );
         println!("{:?}", &copy_buffer_back(&outputs[0])[..10]);
     });
-    expression_cleanup();
 }
 
 #[cfg(feature = "cuda")]

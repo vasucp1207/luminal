@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 10_000;
+const MAX_SEARCHED_GRAPHS: usize = 100_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -46,7 +46,6 @@ const INVALID_IR: &[&str] = &[
     "TiledMatmulInputA",
     "TiledMatmulInputB",
     "TiledMatmulAcc",
-    "FusedLoops",
 ];
 
 type Cost = u128; // Execution time in microseconds
@@ -336,7 +335,7 @@ pub fn search(
 
         let root = graph.externals(Direction::Outgoing).next().unwrap();
         let Some((kernels, gmem_mapping)) =
-            crate::codegen::codegen(graph.clone(), vec![root], arch.clone(), 0, dyn_vars, false)
+            crate::codegen::codegen(graph.clone(), vec![root], arch.clone(), 0, dyn_vars)
         else {
             continue;
         };
@@ -421,9 +420,13 @@ pub fn search(
                 } else {
                     seen.insert(k);
                 }
-                if let Some((us, outs)) =
-                    cost(&kernels, &node_index_to_init_data, &gmem_mapping, dyn_vars)
-                {
+                if let Some((us, outs)) = cost(
+                    &graph,
+                    &kernels,
+                    &node_index_to_init_data,
+                    &gmem_mapping,
+                    dyn_vars,
+                ) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -434,6 +437,7 @@ pub fn search(
                         println!("Graph {valid_graphs} {us}µs");
                         if ref_outputs.is_empty() {
                             ref_outputs = outs;
+                            println!("{}", "Initial".bold().on_bright_green());
                         } else {
                             for (a, b) in ref_outputs.iter().zip(&outs) {
                                 for (x, y) in a.iter().zip(b) {
@@ -454,11 +458,10 @@ pub fn search(
                                                     .map(|v| &v[..v.len().min(20)])
                                                     .collect_vec()
                                             );
-                                            crate::debug::display_graph(&og, &[]);
-                                            crate::debug::display_graph(&graph, &[]);
-                                            generate_proof(&og, &graph);
+                                            // crate::utils::generate_proof(&og, &graph);
                                             println!("{}", og_kernels);
                                             println!("{}", print_kernels(&kernels));
+                                            crate::debug::display_multiple_graphs(&[&og, &graph]);
                                             panic!(
                                                 "{} {x} != {y}",
                                                 "Output Mismatch".bold().on_bright_red()
@@ -475,9 +478,6 @@ pub fn search(
                     if og_kernels.is_empty() {
                         og_kernels = kernel_string.clone();
                     }
-                    // if kernel_string.len() < fastest.len() || fastest.is_empty() {
-
-                    // }
                     if us < best_time {
                         best_time = us;
                         best_graph = Some(graph);
@@ -515,8 +515,7 @@ pub fn extraction_to_graph(
     ) -> Ret {
         let node_choice = trajectory[*current];
         let enode = &egraph.nodes[node_choice];
-        // println!("enter: {}", enode.op);
-        let r = match enode.op.as_str() {
+        match enode.op.as_str() {
             "GMEM" => {
                 *current += 1;
                 Ret::Expr(
@@ -544,7 +543,6 @@ pub fn extraction_to_graph(
                 let Ret::Math(stride) = recurse(egraph, trajectory, current, g) else {
                     panic!();
                 };
-                // println!("Done");
                 let r = g.add_node(match enode.op.as_str() {
                     "LoopIn" => GraphTerm::LoopIn {
                         range,
@@ -646,6 +644,13 @@ pub fn extraction_to_graph(
                 g.add_edge(child_one, r, ());
                 Ret::Expr(r)
             }
+            "Fused" => {
+                *current += 1;
+                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
+                    panic!()
+                };
+                Ret::Expr(child_one)
+            }
             // ----------- literals & vars -----------
             op if op.starts_with("MNum:") => {
                 let num: i64 = op["MNum:".len()..].parse().expect("invalid MNum literal");
@@ -713,9 +718,7 @@ pub fn extraction_to_graph(
                     panic!("unsupported op '{}'", enode.op)
                 }
             }
-        };
-        // println!("exit: {}", enode.op);
-        r
+        }
     }
 
     recurse(egraph, trajectory, &mut 0, &mut g);
@@ -777,6 +780,7 @@ fn cost<'a>(
 
 #[cfg(feature = "metal")]
 fn cost<'a>(
+    graph: &StableGraph<GraphTerm, ()>,
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
     inputs: &[(NodeIndex, InitData)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
@@ -803,6 +807,7 @@ fn cost<'a>(
         // Warm up resources (buffer allocation, kernel compiler, etc.)
         for _ in 0..WARMUP_TRIALS {
             run_graph(
+                &graph,
                 &mut inputs,
                 &kernels,
                 dyn_vars,
@@ -818,6 +823,7 @@ fn cost<'a>(
 
         for _ in 0..TRIALS {
             (outputs, m) = run_graph(
+                &graph,
                 &mut inputs,
                 &kernels,
                 dyn_vars,
