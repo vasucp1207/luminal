@@ -27,7 +27,7 @@ fn main() {
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            // display_graph(graph);
+            luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
             let searched_graph = search(
                 graph,
@@ -149,7 +149,6 @@ fn main() {
         );
         println!("{:?}", &copy_metal_buffer_back(&outputs[0])[..10]);
     });
-    expression_cleanup();
 }
 
 pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {

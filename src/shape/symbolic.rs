@@ -1,35 +1,29 @@
 use egg::*;
-use generational_box::{AnyStorage, GenerationalBox, Owner, UnsyncStorage};
+use generational_box::{AnyStorage, GenerationalBox, Owner, SyncStorage};
 use rustc_hash::FxHashMap;
 use serde::{Serialize, Serializer};
 use std::{
-    cell::RefCell,
     fmt::Debug,
     hash::Hash,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, Div, DivAssign, Mul, MulAssign,
         Rem, RemAssign, Sub, SubAssign,
     },
+    sync::OnceLock,
 };
 use symbolic_expressions::Sexp;
 
-thread_local! {
-   static EXPRESSION_OWNER: RefCell<Option<Owner<UnsyncStorage>>> = RefCell::new(Some(UnsyncStorage::owner()));
+type ExprBox = GenerationalBox<Vec<Term>, SyncStorage>;
+
+static EXPR_OWNER: OnceLock<Owner<SyncStorage>> = OnceLock::new();
+
+pub fn expression_owner() -> &'static Owner<SyncStorage> {
+    EXPR_OWNER.get_or_init(SyncStorage::owner)
 }
 
-/// Clean up symbolic expresion storage
-pub fn expression_cleanup() {
-    EXPRESSION_OWNER.with(|cell| cell.borrow_mut().take());
-}
-
-/// Get the thread-local owner of expression storage
-pub fn expression_owner() -> Owner {
-    EXPRESSION_OWNER.with(|cell| cell.borrow().clone().unwrap())
-}
-
-#[derive(Clone, Copy)]
+#[derive(Copy, Clone)]
 pub struct Expression {
-    pub terms: GenerationalBox<Vec<Term>>,
+    pub terms: ExprBox,
 }
 
 impl Serialize for Expression {
@@ -1207,7 +1201,6 @@ mod tests {
                 .unwrap(),
             768
         );
-        expression_cleanup();
     }
 
     #[test]
@@ -1215,7 +1208,6 @@ mod tests {
         let expr = ((Expression::from('a') * 1) + 0) / 1 + (1 - 1);
         let reduced_expr = expr.simplify();
         assert_eq!(reduced_expr, 'a');
-        expression_cleanup();
     }
 
     #[test]
@@ -1224,7 +1216,6 @@ mod tests {
         let sub = Expression::from('x') / 2;
         let new = main.substitute('x', sub).simplify();
         assert_eq!(new.len(), 5);
-        expression_cleanup();
     }
 
     #[test]
@@ -1232,7 +1223,6 @@ mod tests {
         let s = Expression::from('s');
         let expr = (s * ((s - 4) + 1)) + (((s + 1) * ((s - 4) + 1)) - (s * ((s - 4) + 1)));
         assert_eq!(expr.simplify().len(), 7);
-        expression_cleanup();
     }
 
     #[test]
@@ -1240,7 +1230,6 @@ mod tests {
         let w = Expression::from('w');
         let s = ((((w + 3) / 2) + 2) / 2).simplify();
         assert_eq!(s.simplify(), (w + 7) / 4);
-        expression_cleanup();
     }
 
     #[test]
@@ -1254,7 +1243,6 @@ mod tests {
             % 64;
         let x = o.simplify();
         assert_eq!(x.len(), 23); // Should be 21 if we can re-enable mul-div-associative-rev
-        expression_cleanup();
     }
 
     #[test]
@@ -1264,6 +1252,5 @@ mod tests {
         let h = Expression::from('h');
         let x = (z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64)).simplify();
         assert_eq!(x.len(), 15); // Should be 11 if we can re-enable mul-div-associative-rev
-        expression_cleanup();
     }
 }
