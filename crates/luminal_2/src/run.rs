@@ -464,8 +464,6 @@ pub fn run_graph(
     objc2::rc::autoreleasepool(|_| {
         use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 
-        // println!("deep down in the mines");
-
         let device = MTLCreateSystemDefaultDevice().unwrap();
         let queue = device.newCommandQueue().expect("No command queue");
         let command_buffer = queue.commandBuffer().unwrap();

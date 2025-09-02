@@ -48,6 +48,24 @@ const INVALID_IR: &[&str] = &[
     "TiledMatmulAcc",
 ];
 
+#[cfg(feature = "metal")]
+#[inline]
+fn with_autoreleasepool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    objc2::rc::autoreleasepool(|_| f())
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+fn with_autoreleasepool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    f()
+}
+
 type Cost = u128; // Execution time in microseconds
 
 fn is_expression_enode(enode_label: &str) -> bool {
@@ -729,60 +747,6 @@ pub fn extraction_to_graph(
     g
 }
 
-#[cfg(feature = "cuda")]
-fn cost<'a>(
-    kernels: &StableGraph<Kernel, (usize, usize), Directed>,
-    inputs: &[(NodeIndex, InitData)],
-    gmem_mapping: &HashMap<NodeIndex, usize>,
-    dyn_vars: &FxHashMap<char, usize>,
-) -> Option<(Cost, Vec<Vec<f32>>)> {
-    let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
-    let compiled_kernels = compile_kernels(&kernels);
-    let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
-    // allocation
-    let mut inputs = inputs
-        .into_iter()
-        .map(|(n, b)| {
-            (
-                gmem_mapping[n],
-                (
-                    copy_cuda_buffer(&b.clone().to_vec(dyn_vars), ctx.clone()),
-                    false,
-                ),
-            )
-        })
-        .collect::<FxHashMap<_, _>>();
-    for _ in 0..WARMUP_TRIALS {
-        run_graph(
-            &mut inputs,
-            &kernels,
-            dyn_vars,
-            &compiled_kernels,
-            &int_buffers,
-            &int_buffer_map,
-        );
-    }
-    let mut micros = vec![];
-    let mut outputs = vec![];
-    let mut m;
-    for _ in 0..TRIALS {
-        (outputs, m) = run_graph(
-            &mut inputs,
-            &kernels,
-            dyn_vars,
-            &compiled_kernels,
-            &int_buffers,
-            &int_buffer_map,
-        );
-        micros.push(m);
-    }
-    Some((
-        micros.into_iter().sum::<u128>() / TRIALS as u128,
-        outputs.iter().map(copy_cuda_buffer_back).collect_vec(),
-    ))
-}
-
-#[cfg(feature = "metal")]
 fn cost<'a>(
     graph: &StableGraph<GraphTerm, ()>,
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
@@ -790,11 +754,14 @@ fn cost<'a>(
     gmem_mapping: &HashMap<NodeIndex, usize>,
     dyn_vars: &FxHashMap<char, usize>,
 ) -> Option<(Cost, Vec<Vec<f32>>)> {
-    autoreleasepool(|_| {
+    with_autoreleasepool(|| {
         // Get buffer info
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
         let compiled_kernels = compile_kernels(&kernels);
+        #[cfg(feature = "metal")]
         let device = MTLCreateSystemDefaultDevice().unwrap();
+        #[cfg(feature = "cuda")]
+        let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
         // Copy input buffers over
         let mut inputs = inputs
             .into_iter()
@@ -802,7 +769,10 @@ fn cost<'a>(
                 (
                     gmem_mapping[n],
                     (
+                        #[cfg(feature = "metal")]
                         copy_metal_buffer(&b.clone().to_vec(dyn_vars), &device),
+                        #[cfg(feature = "cuda")]
+                        copy_cuda_buffer(&b.clone().to_vec(dyn_vars), ctx.clone()),
                         false,
                     ),
                 )
@@ -810,8 +780,18 @@ fn cost<'a>(
             .collect::<FxHashMap<_, _>>();
         // Warm up resources (buffer allocation, kernel compiler, etc.)
         for _ in 0..WARMUP_TRIALS {
+            #[cfg(feature = "metal")]
             run_graph(
                 &graph,
+                &mut inputs,
+                &kernels,
+                dyn_vars,
+                &compiled_kernels,
+                &int_buffers,
+                &int_buffer_map,
+            );
+            #[cfg(feature = "cuda")]
+            run_graph(
                 &mut inputs,
                 &kernels,
                 dyn_vars,
@@ -823,23 +803,43 @@ fn cost<'a>(
         // Test runtime
         let mut micros = vec![];
         let mut outputs = vec![];
-        let mut m;
 
         for _ in 0..TRIALS {
-            (outputs, m) = run_graph(
-                &graph,
-                &mut inputs,
-                &kernels,
-                dyn_vars,
-                &compiled_kernels,
-                &int_buffers,
-                &int_buffer_map,
-            );
-            micros.push(m);
+            let (o, m_val) = {
+                #[cfg(feature = "metal")]
+                {
+                    run_graph(
+                        &graph,
+                        &mut inputs,
+                        &kernels,
+                        dyn_vars,
+                        &compiled_kernels,
+                        &int_buffers,
+                        &int_buffer_map,
+                    )
+                }
+
+                #[cfg(feature = "cuda")]
+                {
+                    run_graph(
+                        &mut inputs,
+                        &kernels,
+                        dyn_vars,
+                        &compiled_kernels,
+                        &int_buffers,
+                        &int_buffer_map,
+                    )
+                }
+            };
+            outputs = o;
+            micros.push(m_val);
         }
         Some((
             micros.into_iter().sum::<u128>() / TRIALS as u128,
+            #[cfg(feature = "metal")]
             outputs.iter().map(copy_metal_buffer_back).collect_vec(),
+            #[cfg(feature = "cuda")]
+            outputs.iter().map(copy_cuda_buffer_back).collect_vec(),
         ))
     })
 }

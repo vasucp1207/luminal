@@ -40,6 +40,12 @@ fn main() {
     with_autoreleasepool(|| {
         #[cfg(feature = "cuda")]
         println!("CUDA MODE ENABLED");
+
+        #[cfg(feature = "metal")]
+        let arch = GPUArch::Metal(HashMap::default());
+        #[cfg(feature = "cuda")]
+        let arch = GPUArch::CUDA;
+
         #[allow(non_snake_case)]
         let (M, K, N) = (512, 512, 512);
         let mut cx = Graph::new();
@@ -52,12 +58,8 @@ fn main() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
             // luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
-            #[cfg(feature = "metal")]
-            let arch = GPUArch::Metal(HashMap::default());
-            #[cfg(feature = "cuda")]
-            let arch = GPUArch::CUDA;
 
-            let searched_graph = search(graph, 3, &inputs, arch, &cx.dyn_map).unwrap();
+            let searched_graph = search(graph, 3, &inputs, arch.clone(), &cx.dyn_map).unwrap();
             // adjust meta-edges
             let old_output = graph.externals(Direction::Outgoing).next().unwrap();
             let new_output = searched_graph
@@ -120,14 +122,8 @@ fn main() {
         for (k, v) in mapping {
             unified_map.insert(k, meta_to_final[&v]);
         }
-        let (kernels, gmem_mapping) = codegen(
-            graph.clone(),
-            outputs,
-            GPUArch::Metal(HashMap::default()),
-            0,
-            &HashMap::default(),
-        )
-        .unwrap();
+        let (kernels, gmem_mapping) =
+            codegen(graph.clone(), outputs, arch, 0, &HashMap::default()).unwrap();
 
         let compiled = compile_kernels(&kernels);
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
@@ -163,15 +159,34 @@ fn main() {
             }
         }
 
-        let (outputs, _) = run_graph(
-            &graph,
-            &mut inputs,
-            &kernels,
-            &FxHashMap::default(),
-            &compiled,
-            &int_buffers,
-            &int_buffer_map,
-        );
+        println!("DIDYOU REACH HERE?");
+
+        let (outputs, _) = {
+            #[cfg(feature = "metal")]
+            {
+                run_graph(
+                    &graph,
+                    &mut inputs,
+                    &kernels,
+                    &FxHashMap::default(),
+                    &compiled,
+                    &int_buffers,
+                    &int_buffer_map,
+                )
+            }
+
+            #[cfg(feature = "cuda")]
+            {
+                run_graph(
+                    &mut inputs,
+                    &kernels,
+                    &FxHashMap::default(),
+                    &compiled,
+                    &int_buffers,
+                    &int_buffer_map,
+                )
+            }
+        };
         println!("{:?}", &copy_buffer_back(&outputs[0])[..10]);
     });
 }
