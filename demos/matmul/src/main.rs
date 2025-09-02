@@ -6,17 +6,18 @@ use luminal::prelude::{
     *,
 };
 use luminal_2::{
+    autoreleasepool,
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
-    Buffer, Device, GPUArch, GraphTerm,
+    Buffer, Device, GPUArch, GraphTerm, MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLResourceOptions,
 };
-use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use rustc_hash::FxHashMap;
 
 fn main() {
-    objc2::rc::autoreleasepool(|_| {
+    autoreleasepool(|_| {
         #[allow(non_snake_case)]
         let (M, K, N) = (512, 512, 512);
         let mut cx = Graph::new();
