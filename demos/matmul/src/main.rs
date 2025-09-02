@@ -27,7 +27,7 @@ fn main() {
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            luminal_2::debug::display_graph(&graph);
+            // luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
             let searched_graph = search(
                 graph,

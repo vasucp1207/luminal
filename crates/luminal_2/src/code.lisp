@@ -62,6 +62,9 @@
 ; leave other vars unchanged
 (rewrite (MReplace (MVar ?v) (MVar ?x) ?y) (MVar ?v) :when ((!= ?v ?x)) :ruleset expr)
 
+(ruleset cleanup)
+(rule ((= e (MReplace a b c))) ((delete (MReplace a b c))) :ruleset cleanup)
+
 ; -------- IR --------
 (ruleset ir)
 (ruleset ir-prop)
@@ -522,6 +525,7 @@
 		(run ir)
 		(saturate ir-prop)
 		(saturate expr)
+		(saturate cleanup) ; i don't know if this does anything
 	)
 	(saturate ir-generic)
 	(saturate tc)
