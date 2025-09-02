@@ -8,7 +8,6 @@ use luminal::prelude::{
     *,
 };
 use luminal_2::{
-    autoreleasepool,
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
