@@ -1,4 +1,5 @@
 pub mod codegen;
+pub mod debug;
 pub mod extract;
 pub mod run;
 pub mod translate;
@@ -8,7 +9,18 @@ pub mod utils;
 mod tests;
 
 use luminal::prelude::*;
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLFunction;
 use std::{collections::HashMap, fmt::Debug};
+
+#[cfg(feature = "metal")]
+pub use objc2::rc::autoreleasepool;
+#[cfg(feature = "metal")]
+pub use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+
+pub type Device = Retained<ProtocolObject<dyn MTLDevice>>;
+pub type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+pub type Function = Retained<ProtocolObject<dyn MTLFunction>>;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum GPUArch {
@@ -90,6 +102,7 @@ pub enum GraphTerm {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct CompatKernel(Kernel, *mut Graph);
 

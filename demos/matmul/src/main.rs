@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
 use itertools::Itertools;
 use luminal::prelude::{
@@ -6,18 +6,18 @@ use luminal::prelude::{
     *,
 };
 use luminal_2::{
+    autoreleasepool,
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
-    utils::build_search_space,
-    GPUArch, GraphTerm,
+    Buffer, Device, GPUArch, GraphTerm, MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLResourceOptions,
 };
-use metal_rs::{objc::rc::autoreleasepool, Buffer, Device, MTLResourceOptions};
 use rustc_hash::FxHashMap;
 
 fn main() {
-    autoreleasepool(|| {
+    autoreleasepool(|_| {
         #[allow(non_snake_case)]
         let (M, K, N) = (512, 512, 512);
         let mut cx = Graph::new();
@@ -28,10 +28,11 @@ fn main() {
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            let search_space = build_search_space(graph, 3);
+            // luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
             let searched_graph = search(
-                &search_space,
+                graph,
+                3,
                 &inputs,
                 GPUArch::Metal(HashMap::default()),
                 &cx.dyn_map,
@@ -100,19 +101,18 @@ fn main() {
             unified_map.insert(k, meta_to_final[&v]);
         }
         let (kernels, gmem_mapping) = codegen(
-            graph,
+            graph.clone(),
             outputs,
             GPUArch::Metal(HashMap::default()),
             0,
             &HashMap::default(),
-            false,
         )
         .unwrap();
 
         let compiled = compile_kernels(&kernels);
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
 
-        let device = Device::system_default().unwrap();
+        let device = MTLCreateSystemDefaultDevice().unwrap();
         let mut inputs = FxHashMap::default();
         inputs.insert(
             gmem_mapping[&unified_map[&a.id]],
@@ -123,10 +123,7 @@ fn main() {
             (copy_metal_buffer(&vec![1.; K * M], &device), false),
         );
         for (label, val) in &accs {
-            if let Some(node) = gmem_to_node_mapping
-                .get(label)
-                .and_then(|n| unified_map.get(n))
-            {
+            if let Some(node) = gmem_to_node_mapping.get(label) {
                 match val {
                     InitData::Expr(e) => {
                         let val = e.exec(&cx.dyn_map).unwrap();
@@ -143,6 +140,7 @@ fn main() {
         }
 
         let (outputs, _) = run_graph(
+            &graph,
             &mut inputs,
             &kernels,
             &FxHashMap::default(),
@@ -152,21 +150,23 @@ fn main() {
         );
         println!("{:?}", &copy_metal_buffer_back(&outputs[0])[..10]);
     });
-    expression_cleanup();
 }
 
 pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
-    let buf = device.new_buffer_with_data(
-        v.as_ptr() as *const _,
-        (v.len() * std::mem::size_of::<f32>()) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
-    buf
+    unsafe {
+        device
+            .newBufferWithBytes_length_options(
+                NonNull::new(v.as_ptr() as *mut c_void).unwrap(),
+                v.len() * std::mem::size_of::<f32>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+            .unwrap()
+    }
 }
 
 pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
     let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
-    let ptr = v.contents() as *mut f32;
+    let ptr = v.contents().as_ptr() as *mut f32;
     for (i, d) in data.iter_mut().enumerate() {
         *d = unsafe { *ptr.add(i) };
     }

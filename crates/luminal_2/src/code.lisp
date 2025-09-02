@@ -30,7 +30,7 @@
 ; Constant folding
 (rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
-(rewrite (MMul (MNum a) (MNum b)) (MNum (* a b)) :when ((< a 10000) (< b 10000)) :ruleset expr)
+(rewrite (MMul (MNum ?a) (MNum ?b)) (MNum (* ?a ?b)) :when ((< ?a 10000) (< ?b 10000)) :ruleset expr)
 (rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MMax (MNum a) (MNum b)) (MNum (max a b)) :ruleset expr)
 (rewrite (MMin (MNum a) (MNum b)) (MNum (min a b)) :ruleset expr)
@@ -41,12 +41,7 @@
 (rewrite (MMul a (MNum 1)) a :ruleset expr)
 (rewrite (MMul a (MNum 0)) (MNum 0) :ruleset expr)
 (rewrite (MDiv a (MNum 1)) a :ruleset expr)
-(rewrite (MMul (MDiv ?a ?b) ?b) (MFloorTo ?a ?b) :ruleset expr)
-(rewrite (MAdd (MFloorTo ?a ?b) (MMod ?a ?b)) ?a :ruleset expr)
-;(rewrite (MDiv ?a ?a) (MNum 1) :ruleset expr) ; why does this cause kernels to incorrectly oversimplify?
-;(rewrite (MDiv (MMul ?x ?y) ?y) ?x :ruleset expr) ; and this?
 (rewrite (MMod (MMul ?x ?y) ?y) (MNum 0) :ruleset expr)
-(rewrite (MDiv (MMul ?x ?y) ?z) (MMul ?x (MDiv ?y ?z)) :ruleset expr)
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?y)) :when ((>= ?z ?y) (= 0 (% ?y ?z))) :ruleset expr) ; nested mods
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?z)) :when ((>= ?y ?z) (= 0 (% ?z ?y))) :ruleset expr)
 
@@ -67,54 +62,55 @@
 ; leave other vars unchanged
 (rewrite (MReplace (MVar ?v) (MVar ?x) ?y) (MVar ?v) :when ((!= ?v ?x)) :ruleset expr)
 
+(ruleset cleanup)
+(rule ((= e (MReplace a b c))) ((delete (MReplace a b c))) :ruleset cleanup)
+
 ; -------- IR --------
 (ruleset ir)
 (ruleset ir-prop)
 (ruleset ir-generic)
 (datatype LoopType (Loop String Expression))
-(datatype*
- 	(IR
-  		; General kernel stuff
-     	(GMEM String)
-     	(LoopIn IR LoopType Expression)
-     	(LoopOut IR LoopType Expression)
-      	(SMEM)
-       	(SMEMLoad IR IR)
-        (SMEMRead IR IR)
+(datatype IR
+	; General kernel stuff
+   	(GMEM String)
+   	(LoopIn IR LoopType Expression)
+   	(LoopOut IR LoopType Expression)
+   	(SMEM)
+   	(SMEMLoad IR IR)
+    (SMEMRead IR IR)
 
-        ; Unary Ops
-     	(Exp2 IR)
-      	(Log2 IR)
-    	(Sqrt IR)
-     	(Sin IR)
-      	(Recip IR)
-       	(Neg IR)
+    ; Unary Ops
+   	(Exp2 IR)
+   	(Log2 IR)
+   	(Sqrt IR)
+   	(Sin IR)
+   	(Recip IR)
+   	(Neg IR)
 
-        ; Binary Ops
-     	(Add IR IR)
-     	(Mul IR IR)
-      	(Max IR IR)
+    ; Binary Ops
+   	(Add IR IR)
+   	(Mul IR IR)
+   	(Max IR IR)
 
-        ; search helpers
-        (Unary String IR)
-     	(Binary String IR IR)
+    ; search helpers
+    (Unary String IR)
+   	(Binary String IR IR)
 
-      	; propogation patterns
-      	(SwapLoops IR LoopType LoopType) ; Swap two loops, identified by their strings
-       	(TileLoop IR String) ; Tile a loop, identified by it's string
-        (UnpadLoop IR String) ; Remove a padding loop, identified by it's string
-        (MergeLoops IR String String) ; Merge loops, identified by their strings
-        (FusedLoops IR Expression) ; Says that we have previously fused a loopout -> loopin here
+   	; propogation patterns
+   	(SwapLoops IR String String) ; Swap two loops, identified by their strings
+   	(TileLoop IR String) ; Tile a loop, identified by it's string
+    (UnpadLoop IR String) ; Remove a padding loop, identified by it's string
+    (MergeLoops IR String String) ; Merge loops, identified by their strings
+    (Fused IR) ; Says that we have previously fused a loopout -> loopin here
 
-    	; propogation pattern helpers
-     	(PropOneArg String IR String) ; Generic prop one arg back
-     	(PropTwoArgs String IR String String) ; Generic prop two args back
+   	; propogation pattern helpers
+   	(PropOneArg String IR String) ; Generic prop one arg back
+   	(PropTwoArgs String IR String String) ; Generic prop two args back
 
-      	; tensor core stuff
-      	(TCMatmul IR IR Expression Expression Expression Expression Expression Expression) ; input A, input B, A k stride, B k stride, A inner stride, B inner stride, C inner stride, number of K tile loops
-       	(TiledMatmulInputA IR i64 Expression)
-        (TiledMatmulInputB IR i64 Expression)
-     )
+   	; tensor core stuff
+   	(TCMatmul IR IR Expression Expression Expression Expression Expression Expression) ; input A, input B, A k stride, B k stride, A inner stride, B inner stride, C inner stride, number of K tile loops
+   	(TiledMatmulInputA String i64 Expression)
+    (TiledMatmulInputB String i64 Expression)
 )
 
 ; -------------- HELPERS ---------------
@@ -133,8 +129,20 @@
 ; Communative binary ops
 (rewrite (Binary ?bin ?a ?b) (Binary ?bin ?b ?a) :ruleset ir)
 ; distributive/associative skeletons so sums and products re-associate
-;(rewrite (Add (Add ?a ?b) ?c) (Add ?a (Add ?b ?c)) :ruleset ir)
-;(rewrite (Mul (Mul ?a ?b) ?c) (Mul ?a (Mul ?b ?c)) :ruleset ir)
+(rewrite (Add (Add ?a ?b) ?c) (Add ?a (Add ?b ?c)) :ruleset ir)
+(rewrite (Mul (Mul ?a ?b) ?c) (Mul ?a (Mul ?b ?c)) :ruleset ir)
+
+; set containing maccums
+(sort ExpressionSetBase (Set Expression))
+
+; a single global set, merged by union
+(function MAccumSet () ExpressionSetBase
+  :merge (set-union old new))
+
+; for every (MAccum ...), add that exact term to the set
+(rule ((= ?e (MAccum ?s)))
+  ((set (MAccumSet) (set-of ?e)))
+  :ruleset ir-prop)
 
 ; ---------- RULES ----------
 
@@ -142,104 +150,74 @@
 (rewrite
  	(LoopOut (Unary ?un (LoopIn ?x (Loop ?loop (MNum 1)) (MNum 0))) (Loop ?loop (MNum 1)) (MNum 0))
 	(Unary ?un ?x)
-	 :ruleset ir
+	 ;:ruleset ir
 )
 (rewrite
  	(LoopOut (Binary ?bin (LoopIn ?a (Loop ?loop (MNum 1)) (MNum 0)) (LoopIn ?b (Loop ?loop (MNum 1)) (MNum  0))) (Loop ?loop (MNum 1)) (MNum 0))
 	(Binary ?bin ?a ?b)
-	 :ruleset ir
+	 ;:ruleset ir
 )
 ; add pad loop
 (rewrite
 	(LoopOut (Unary ?un ?x) (Loop ?l ?r) ?s)
 	(LoopOut (LoopOut (Unary ?un (LoopIn ?x (Loop "newpad" (MNum 1)) (MNum 0))) (Loop "newpad" (MNum 1)) (MNum 0)) (Loop ?l ?r) ?s)
 	:when ((!= ?r (MNum 1)) (!= ?s (MNum 0)))
-	:ruleset ir
+	;:ruleset ir
 )
 (rewrite
 	(LoopOut (Binary ?bin ?a ?b) (Loop ?l ?r) ?s)
 	(LoopOut (LoopOut (Binary ?bin (LoopIn ?a (Loop "newpad" (MNum 1)) (MNum 0)) (LoopIn ?b (Loop "newpad" (MNum 1)) (MNum 0))) (Loop "newpad" (MNum 1)) (MNum 0)) (Loop ?l ?r) ?s)
 	:when ((!= ?r (MNum 1)) (!= ?s (MNum 0)))
-	:ruleset ir
+	;:ruleset ir
 )
 
 
 ; Loop Fusion
-(ruleset fusion)
-(rewrite (LoopIn (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (Binary ?bin ?a ?b) :ruleset fusion)
-(rewrite (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (FusedLoops ?a ?range) :ruleset fusion)
-(rewrite (LoopIn (FusedLoops (LoopOut ?a (Loop ?loopA ?range) ?st) ?fused_range) (Loop ?loopB ?range) ?st) (FusedLoops ?a (MMul ?range ?fused_range)) :ruleset fusion)
-(rewrite (LoopIn (FusedLoops (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) ?fused_range) (Loop ?loopB ?range) ?st) (Binary ?bin ?a ?b) :ruleset fusion)
-
-; Specialized swap loops
 (rewrite
-	(LoopOut
-		(LoopOut
-			(Binary ?bin
-				(LoopIn
-					(LoopIn ?a (Loop ?outL ?out) ?outASt)
-					(Loop ?inL ?in)
-					?inASt
-				)
-				(LoopIn
-					(LoopIn ?b (Loop ?outL ?out) ?outBSt)
-					(Loop ?inL ?in)
-					?inBSt
-				)
-			)
-			(Loop ?inL ?in)
-			?inSt
-		)
-		(Loop ?outL ?out)
-		?outSt
-	)
-	(LoopOut
-		(LoopOut
-			(Binary ?bin
-				(LoopIn
-					(LoopIn ?a (Loop ?inL ?in) ?inASt)
-					(Loop ?outL ?out)
-					?outASt
-				)
-				(LoopIn
-					(LoopIn ?b (Loop ?inL ?in) ?inBSt)
-					(Loop ?outL ?out)
-					?outBSt
-				)
-			)
-			(Loop ?outL ?out)
-			?outSt
-		)
-		(Loop ?inL ?in)
-		?inSt
-	)
+	(LoopIn (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st)
+	(Fused (Binary ?bin ?a ?b))
+	:ruleset ir
+)
+(rewrite
+	(LoopIn (LoopIn
+		(LoopOut (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2)
+	(Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Fused (Binary ?bin ?a ?b))
 	 :ruleset ir
+)
+(rewrite
+	(LoopIn (LoopIn (LoopIn
+		(LoopOut (LoopOut (LoopOut
+			(Binary ?bin ?a ?b)
+		(Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2) (Loop ?loopA3 ?range3) ?st3)
+	(Loop ?loopB3 ?range3) ?st3) (Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Fused (Binary ?bin ?a ?b))
+	:ruleset ir
 )
 
 ; Tiling
-(let tileFactor 8)
 (rewrite
 	(LoopOut ?body (Loop ?loop (MNum ?range)) ?stride)
 	(LoopOut
 		(LoopOut
 			(TileLoop ?body ?loop)
-			(Loop (+ ?loop "_tile") (MNum tileFactor))
+			(Loop (+ ?loop "_tile") (MNum 8))
 			?stride
 		)
-		(Loop (+ ?loop "_out") (MNum (/ ?range tileFactor)))
-		(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum tileFactor)))
+		(Loop (+ ?loop "_out") (MNum (/ ?range 8)))
+		(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
 	)
-	:when ((> ?range tileFactor) (= (% ?range tileFactor) 0))
+	:when ((> ?range 8) (= (% ?range 8) 0))
 	:ruleset ir
 )
 (rewrite
 	(TileLoop (LoopIn ?body (Loop ?loop (MNum ?range)) ?stride) ?loop)
 	(LoopIn
 		(LoopIn ?body
-			(Loop (+ ?loop "_out") (MNum (/ ?range tileFactor)))
-			(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum tileFactor)))
+			(Loop (+ ?loop "_out") (MNum (/ ?range 8)))
+			(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
 		)
-		(Loop (+ ?loop "_tile") (MNum tileFactor))
+		(Loop (+ ?loop "_tile") (MNum 8))
 		?stride
 	)
 	:ruleset ir-prop
@@ -272,16 +250,16 @@
 (rewrite
 	(LoopOut
 		(LoopOut ?x
-			(Loop ?i ?rangeI) ?stI
+			(Loop ?i (MNum ?rangeI)) ?stI
 		)
-		(Loop ?o ?rangeO) ?stO
+		(Loop ?o (MNum ?rangeO)) ?stO
 	)
 	(LoopOut (MergeLoops ?x ?o ?i)
-		(Loop (+ ?o ?i) (MMul ?rangeO ?rangeI))
-		(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") ?rangeI)) (MReplace ?stI (MVar "z") (MMod (MVar "z") ?rangeI)))
+		(Loop (+ ?o (+ "merge" ?i)) (MNum (* ?rangeO ?rangeI)))
+		(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") (MNum ?rangeI))) (MReplace ?stI (MVar "z") (MMod (MVar "z") (MNum ?rangeI))))
 	)
-	;:ruleset ir
-	:when ((!= ?stI (MAccum "a")) (!= ?stO (MAccum "a")))
+	:when ((set-not-contains (MAccumSet) ?stI) (set-not-contains (MAccumSet) ?stO))
+	:ruleset ir
 )
 (rewrite
 	(MergeLoops
@@ -296,7 +274,7 @@
 	)
 	(LoopIn
 		?x
-		(Loop (+ ?o ?i) (MMul ?rangeO ?rangeI))
+		(Loop (+ ?o (+ "merge" ?i)) (MMul ?rangeO ?rangeI))
 		(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") ?rangeI)) (MReplace ?stI (MVar "z") (MMod (MVar "z") ?rangeI)))
 	)
 	 :ruleset ir-prop
@@ -328,21 +306,13 @@
 (ruleset tc)
 (rewrite
 	(LoopIn ; k
-		(LoopIn ; pad2
-			(LoopIn ; pad1
-				(LoopIn ; n
-					(LoopIn ; m
-						?a
-						(Loop ?loop_a_mtile (MNum ?m))
-						(MMul (MVar "z") (MNum ?k))
-					)
-					(Loop ?loop_a_ntile (MNum ?n))
-					(MNum 0)
-				)
-				(Loop ?pad1 (MNum 1))
-				(MNum 0)
+		(LoopIn ; n
+			(LoopIn ; m
+				(GMEM ?a)
+				(Loop ?loop_a_mtile (MNum ?m))
+				(MMul (MVar "z") (MNum ?k))
 			)
-			(Loop ?pad2 (MNum 1))
+			(Loop ?loop_a_ntile (MNum ?n))
 			(MNum 0)
 		)
 		(Loop ?loop_a_kouter (MNum ?k))
@@ -354,22 +324,14 @@
 )
 (rewrite
 	(LoopIn ; k
-		(LoopIn ; pad2
-			(LoopIn ; pad1
-				(LoopIn ; n
-					(LoopIn ; m
-						?b
-						(Loop ?loop_b_mtile (MNum ?m))
-						(MNum 0)
-					)
-					(Loop ?loop_b_ntile (MNum ?n))
-					(MVar "z")
-				)
-				(Loop ?pad1 (MNum 1))
+		(LoopIn ; n
+			(LoopIn ; m
+				(GMEM ?b)
+				(Loop ?loop_b_mtile (MNum ?m))
 				(MNum 0)
 			)
-			(Loop ?pad2 (MNum 1))
-			(MNum 0)
+			(Loop ?loop_b_ntile (MNum ?n))
+			(MVar "z")
 		)
 		(Loop ?loop_b_kouter (MNum ?k))
 		(MMul (MVar "z") (MNum ?n))
@@ -381,45 +343,29 @@
 (rewrite
 	(LoopOut ; m
 		(LoopOut ; n
-			(LoopOut ; pad1
-				(LoopOut ; pad2
-					 (LoopOut ; k
-						(Add
-							(Mul
-								(TiledMatmulInputA ?a ?k ?k_loops)
-								(TiledMatmulInputB ?b ?n ?k_loops)
+			 (LoopOut ; k
+				(Add
+					(Fused (Mul
+						(TiledMatmulInputA ?a ?k ?k_loops)
+						(TiledMatmulInputB ?b ?n ?k_loops)
+					))
+					; accumulator
+					(LoopIn ; k outer
+						(LoopIn ; n tile
+							(LoopIn ; m tile
+								?acc
+								(Loop ?loop_acc_mtile (MNum ?m))
+								(MNum 0)
 							)
-							; accumulator
-							(LoopIn ; k outer
-								(LoopIn ; pad2
-									(LoopIn ; pad1
-										(LoopIn ; n tile
-											(LoopIn ; m tile
-												?acc
-												(Loop ?loop_acc_mtile (MNum ?m))
-												(MNum 0)
-											)
-											(Loop ?loop_acc_ntile (MNum ?n))
-											(MNum 0)
-										)
-										(Loop ?pad1 (MNum 1))
-										(MNum 0)
-									)
-									(Loop ?pad2 (MNum 1))
-									(MNum 0)
-								)
-								(Loop ?loop_acc_k (MNum ?k))
-								(MAccum ?accum)
-							)
+							(Loop ?loop_acc_ntile (MNum ?n))
+							(MNum 0)
 						)
-						(Loop ?loop_out_k (MNum ?k))
-						(MAccum ?acc_outer)
+						(Loop ?loop_acc_k (MNum ?k))
+						(MAccum ?accum)
 					)
-					(Loop ?pad2 (MNum 1))
-					(MVar "z")
 				)
-				(Loop ?pad1 (MNum 1))
-				(MVar "z")
+				(Loop ?loop_out_k (MNum ?k))
+				(MAccum ?acc_outer)
 			)
 			(Loop ?loop_out_n (MNum ?n))
 			(MVar "z")
@@ -437,7 +383,7 @@
 							(LoopIn ; m tile
 								(LoopIn ; n outer
 									(LoopIn ; m outer
-										?a
+										(GMEM ?a)
 										(Loop ?loop_out_m (MNum (/ ?m 8)))
 										(MMul (MVar "z") (MNum (* ?k 8)))
 									)
@@ -455,7 +401,7 @@
 							(LoopIn ; m tile
 								(LoopIn ; n outer
 									(LoopIn ; m outer
-										?b
+										(GMEM ?b)
 										(Loop ?loop_out_m (MNum (/ ?m 8)))
 										(MNum 0)
 									)
@@ -497,15 +443,55 @@
 )
 
 ; Swap loops
-(ruleset swap)
 (rewrite
-	(LoopOut (LoopOut ?x ?innerLoop ?innerStride) ?outerLoop ?outerStride)
-	(LoopOut (LoopOut (SwapLoops ?x ?innerLoop ?outerLoop) ?outerLoop ?outerStride) ?innerLoop ?innerStride)
-	:ruleset swap
+	(LoopOut
+		(LoopOut
+			?x
+			(Loop ?innerLoop ?innerRange)
+			?innerStride
+		)
+		(Loop ?outerLoop ?outerRange)
+		?outerStride
+	)
+	(LoopOut
+		(LoopOut
+			(SwapLoops
+				?x
+				?innerLoop
+				?outerLoop
+			)
+			(Loop ?outerLoop ?outerRange)
+			?outerStride
+		)
+		(Loop ?innerLoop ?innerRange)
+		?innerStride
+	)
+	:when ((set-not-contains (MAccumSet) ?innerStride) (!= ?innerLoop ?outerLoop))
+	;:ruleset ir
 )
 (rewrite
-	(SwapLoops (LoopIn (LoopIn ?x ?outerLoop ?outerStride) ?innerLoop ?innerStride) ?innerLoop ?outerLoop)
-	(LoopIn (LoopIn ?x ?innerLoop ?innerStride) ?outerLoop ?outerStride)
+	(SwapLoops
+		(LoopIn
+			(LoopIn
+				?x
+				(Loop ?outerLoop ?outerRange)
+				?outerStride
+			)
+			(Loop ?innerLoop ?innerRange)
+			?innerStride
+		)
+		?innerLoop
+		?outerLoop
+	)
+	(LoopIn
+		(LoopIn
+			?x
+			(Loop ?innerLoop ?innerRange)
+			?innerStride
+		)
+		(Loop ?outerLoop ?outerRange)
+		?outerStride
+	)
 	:ruleset ir-prop
 )
 ; propogate
@@ -515,9 +501,14 @@
 	:ruleset ir-prop
 )
 (rewrite
-	(SwapLoops (LoopIn ?x ?loop ?stride) ?innerLoop ?outerLoop)
-	(LoopIn (SwapLoops ?x ?innerLoop ?outerLoop) ?loop ?stride)
-	:when ((!= ?loop ?outerLoop))
+	(SwapLoops (LoopIn ?x (Loop ?loop ?range) ?stride) ?innerLoop ?outerLoop)
+	(LoopIn (SwapLoops ?x ?innerLoop ?outerLoop) (Loop ?loop ?range) ?stride)
+	:when ((!= ?loop ?innerLoop))
+	:ruleset ir-prop
+)
+(rewrite
+	(SwapLoops (Unary ?un ?a) ?innerLoop ?outerLoop)
+	(Unary ?un (SwapLoops ?a ?innerLoop ?outerLoop))
 	:ruleset ir-prop
 )
 (rewrite
@@ -528,20 +519,19 @@
 
 {code}
 (run-schedule
-	(run ir-generic)
-	(repeat 5
+	(saturate ir-generic)
+	(saturate expr)
+	(repeat 2
 		(run ir)
-		(run ir-prop)
-		(run expr)
-		(repeat 2 fusion)
-		(run ir-generic)
+		(saturate ir-prop)
+		(saturate expr)
+		(saturate cleanup) ; i don't know if this does anything
 	)
-	;(run ir) ; run ir rules once
-	;(run swap) ; run swap every other run
-	;(repeat 5 ir-prop)
-	;(repeat 3 expr)
-	;(run swap)
-	;(repeat 3 ir-prop)
-	(run ir-generic)
-	(repeat 3 tc)
+	(saturate ir-generic)
+	(saturate tc)
 )
+
+;(ruleset loop-blank)
+;(rewrite (Loop ?s ?r) (Loop "" ?r) :ruleset loop-blank)
+;(rewrite (MergeLoops ?x ?r ?y) (MergeLoops ?x "" "") :ruleset loop-blank)
+;(run-schedule (run loop-blank))

@@ -423,7 +423,6 @@ mod tests {
         println!("Strides: {:?}", tracker.strides());
         println!("Ind: {:?}", tracker.index_expression());
         println!("Val: {:?}", tracker.valid_expression());
-        expression_cleanup();
     }
 
     #[test]
