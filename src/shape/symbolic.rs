@@ -1063,12 +1063,11 @@ impl Analysis<Math> for ConstantFold {
             Math::Mul([a, b]) => x(a)?.checked_mul(x(b)?)?,
             Math::Div([a, b]) if x(b) != Some(0) => {
                 let (a, b) = (x(a)?, x(b)?);
-                a / b
-                // if a % b != 0 {
-                //     return None;
-                // } else {
-                //     a.checked_div(b)?
-                // }
+                if a % b != 0 {
+                    return None;
+                } else {
+                    a.checked_div(b)?
+                }
             }
             Math::Mod([a, b]) => x(a)?.checked_rem(x(b)?)?,
             Math::Min([a, b]) => x(a)?.min(x(b)?),
@@ -1229,7 +1228,7 @@ mod tests {
     fn test_simple_div() {
         let w = Expression::from('w');
         let s = ((((w + 3) / 2) + 2) / 2).simplify();
-        assert_eq!(s.simplify(), (w + 7) / 4);
+        assert_eq!(s, (w + 7) / 4);
     }
 
     #[test]
