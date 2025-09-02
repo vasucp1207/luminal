@@ -349,9 +349,13 @@ pub fn search(
                 } else {
                     seen.insert(k);
                 }
-                if let Some((us, outs)) =
-                    cost(&kernels, &node_index_to_init_data, &gmem_mapping, dyn_vars)
-                {
+                if let Some((us, outs)) = cost(
+                    &graph,
+                    &kernels,
+                    &node_index_to_init_data,
+                    &gmem_mapping,
+                    dyn_vars,
+                ) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -382,8 +386,8 @@ pub fn search(
                                                     .map(|v| &v[..v.len().min(20)])
                                                     .collect_vec()
                                             );
-                                            crate::debug::display_graph(&og, &[]);
-                                            crate::debug::display_graph(&graph, &[]);
+                                            crate::debug::display_graph(&og);
+                                            crate::debug::display_graph(&graph);
                                             generate_proof(&og, &graph);
                                             println!("{}", og_kernels);
                                             println!("{}", print_kernels(&kernels));
