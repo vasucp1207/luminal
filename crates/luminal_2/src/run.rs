@@ -1,12 +1,19 @@
 #[cfg(feature = "metal")]
-use crate::{Buffer, Function};
+use crate::{Buffer, Device, Function};
 use crate::{
-    Device, GPUArch, GraphTerm,
+    GPUArch, GraphTerm,
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
     translate::{InitData, OptimalGraphNodeIndex, SubGraphNodeIndex, translate_graph},
 };
+#[cfg(feature = "cuda")]
+use cudarc::{driver::*, nvrtc::CompileOptions};
 use itertools::Itertools;
+#[cfg(feature = "cuda")]
+use std::fs::OpenOptions;
+#[cfg(feature = "cuda")]
+use std::io::Write;
+
 use luminal::{
     prelude::{
         Graph, GraphTensor, NodeIndex,
@@ -19,6 +26,7 @@ use luminal::{
     },
     shape::Expression,
 };
+#[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
@@ -239,11 +247,24 @@ pub fn compile_kernels(
 ) -> FxHashMap<String, CudaFunction> {
     let ctx = cudarc::driver::CudaContext::new(0).unwrap();
     let mut compiled = FxHashMap::default();
+
+    // Open (or create) the log file, appending logs to it
+    let log_path = "kernel_log.txt";
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true) // overwrite on each run
+        .open(log_path)
+        .expect("Failed to open kernel log file");
+
     for kernel in kernels.node_weights() {
         if !compiled.contains_key(&kernel.code)
             && kernel.code != "Inputs"
             && kernel.code != "Outputs"
         {
+            writeln!(log_file, "Compiling kernel:\n{}\n", kernel.code)
+                .expect("Failed to write to kernel log file");
+
             let ptx = cudarc::nvrtc::compile_ptx_with_opts(
                 &kernel.code,
                 CompileOptions {
@@ -373,6 +394,7 @@ pub fn run_graph(
             stream.memcpy_htod(&data, dest_buffer).unwrap();
         } else {
             let mut builder = stream.launch_builder(&compiled_kernels[&kernel.code]);
+            println!("Code to run: {}", kernel.code);
 
             // set inputs
             for (input, input_index) in kernels
@@ -441,8 +463,6 @@ pub fn run_graph(
 ) -> (Vec<Buffer>, u128) {
     objc2::rc::autoreleasepool(|_| {
         use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
-
-        // println!("deep down in the mines");
 
         let device = MTLCreateSystemDefaultDevice().unwrap();
         let queue = device.newCommandQueue().expect("No command queue");
@@ -654,6 +674,7 @@ pub fn run_graph(
     })
 }
 
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     let buf = unsafe {
         device
@@ -667,6 +688,7 @@ pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     buf
 }
 
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
     let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
     let ptr = v.contents().as_ptr() as *mut f32;

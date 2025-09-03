@@ -1,25 +1,33 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::usize;
 
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
-use crate::utils::{build_search_space, print_kernels};
-use crate::{Buffer, Device, Kernel};
+use crate::utils::{build_search_space, generate_proof, print_kernels};
+use crate::Kernel;
+#[cfg(feature = "metal")]
+use crate::{Buffer, Device};
 use crate::{GPUArch, GraphTerm};
+#[cfg(feature = "cuda")]
+use anyhow::Result;
 use colored::Colorize;
+#[cfg(feature = "cuda")]
+use cudarc::driver::{CudaContext, CudaSlice, DriverError};
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
-use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
+use luminal::prelude::NodeIndex;
 use luminal::shape::{Expression, Term};
-use objc2::rc::autoreleasepool;
+#[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
-use rand::{Rng, rng};
+use rand::{rng, Rng};
 use rustc_hash::{FxHashMap, FxHashSet};
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
@@ -37,6 +45,24 @@ const INVALID_IR: &[&str] = &[
     "TiledMatmulInputB",
     "TiledMatmulAcc",
 ];
+
+#[cfg(feature = "metal")]
+#[inline]
+fn with_autoreleasepool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    objc2::rc::autoreleasepool(|_| f())
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+fn with_autoreleasepool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    f()
+}
 
 type Cost = u128; // Execution time in microseconds
 
@@ -102,7 +128,11 @@ fn shortest_from_enode<'a>(
             }
         }
 
-        if ok { Some(acc) } else { None }
+        if ok {
+            Some(acc)
+        } else {
+            None
+        }
     };
 
     *seen.get_mut(&enode).unwrap() -= 1;
@@ -277,6 +307,7 @@ pub fn search(
         ui_functions = Some(crate::utils::search_ui());
     };
     let mut seen = FxHashSet::default();
+    let mut possibles = 0;
     'trajectory_loop: for (n, trajectory) in trajectories
         .into_iter()
         .take(MAX_SEARCHED_GRAPHS)
@@ -328,14 +359,82 @@ pub fn search(
         else {
             continue;
         };
+        possibles += 1;
         // let inputs = inputs.into_iter().filter_map(|(l, d)| graph.node_indices().find(|n| matches!(graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d.clone()))).collect_vec();
         match &arch {
             GPUArch::CUDA => {
-                if let Some((_, s, _, _)) = &ui_functions {
-                    s(format!(
-                        "Graph {valid_graphs} ({:.1}%) ",
-                        (n as f32 / total_trajectories as f32) * 100.0
-                    ));
+                let k = print_kernels(&kernels);
+                if seen.contains(&k) {
+                    continue;
+                } else {
+                    seen.insert(k);
+                }
+                if let Some((us, outs)) = cost(
+                    &graph,
+                    &kernels,
+                    &node_index_to_init_data,
+                    &gmem_mapping,
+                    dyn_vars,
+                ) {
+                    valid_graphs += 1;
+                    if let Some((progress, logs, title, _)) = &ui_functions {
+                        progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
+                        logs(print_kernels(&kernels));
+                        title(format!("Graph {valid_graphs} {us}µs"));
+                    } else if option_env!("DEBUG").is_some() {
+                        println!("{}", print_kernels(&kernels));
+                        println!("Graph {valid_graphs} {us}µs");
+                        if ref_outputs.is_empty() {
+                            ref_outputs = outs;
+                        } else {
+                            for (a, b) in ref_outputs.iter().zip(&outs) {
+                                for (x, y) in a.iter().zip(b) {
+                                    if (x - y).abs() >= 1e-3 {
+                                        if option_env!("DEBUG").is_some() {
+                                            // display_graph(&graph, &[]);
+                                            println!(
+                                                "REF: {:?}",
+                                                &ref_outputs
+                                                    .iter()
+                                                    .map(|v| &v[..v.len().min(20)])
+                                                    .collect_vec()
+                                            );
+                                            println!(
+                                                "New: {:?}",
+                                                &outs
+                                                    .iter()
+                                                    .map(|v| &v[..v.len().min(20)])
+                                                    .collect_vec()
+                                            );
+                                            crate::debug::display_graph(&og);
+                                            crate::debug::display_graph(&graph);
+                                            generate_proof(&og, &graph);
+                                            println!("{}", og_kernels);
+                                            println!("{}", print_kernels(&kernels));
+                                            panic!(
+                                                "{} {x} != {y}",
+                                                "Output Mismatch".bold().on_bright_red()
+                                            );
+                                        }
+                                        continue 'trajectory_loop;
+                                    }
+                                }
+                            }
+                            println!("{}", "Outputs Validated".bold().on_bright_green());
+                        }
+                    }
+                    let kernel_string = print_kernels(&kernels);
+                    if og_kernels.is_empty() {
+                        og_kernels = kernel_string.clone();
+                    }
+                    // if kernel_string.len() < fastest.len() || fastest.is_empty() {
+
+                    // }
+                    if us < best_time {
+                        best_time = us;
+                        best_graph = Some(graph);
+                        fastest = kernel_string;
+                    }
                 }
             }
             GPUArch::Metal(_) => {
@@ -416,6 +515,7 @@ pub fn search(
         e();
     }
     println!("FASTEST ({}ms): {fastest}", best_time / 1000);
+    println!("Valids: {:?} / {:?}", possibles, total_trajectories);
     best_graph
 }
 
@@ -656,19 +756,25 @@ fn cost<'a>(
     gmem_mapping: &HashMap<NodeIndex, usize>,
     dyn_vars: &FxHashMap<char, usize>,
 ) -> Option<(Cost, Vec<Vec<f32>>)> {
-    autoreleasepool(|_| {
+    with_autoreleasepool(|| {
         // Get buffer info
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
         let compiled_kernels = compile_kernels(&kernels);
+        #[cfg(feature = "metal")]
         let device = MTLCreateSystemDefaultDevice().unwrap();
-        // Copy input buffers over
+        #[cfg(feature = "cuda")]
+        let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
+                                                // Copy input buffers over
         let mut inputs = inputs
             .into_iter()
             .map(|(n, b)| {
                 (
                     gmem_mapping[n],
                     (
+                        #[cfg(feature = "metal")]
                         copy_metal_buffer(&b.clone().to_vec(dyn_vars), &device),
+                        #[cfg(feature = "cuda")]
+                        copy_cuda_buffer(&b.clone().to_vec(dyn_vars), ctx.clone()),
                         false,
                     ),
                 )
@@ -676,8 +782,18 @@ fn cost<'a>(
             .collect::<FxHashMap<_, _>>();
         // Warm up resources (buffer allocation, kernel compiler, etc.)
         for _ in 0..WARMUP_TRIALS {
+            #[cfg(feature = "metal")]
             run_graph(
                 &graph,
+                &mut inputs,
+                &kernels,
+                dyn_vars,
+                &compiled_kernels,
+                &int_buffers,
+                &int_buffer_map,
+            );
+            #[cfg(feature = "cuda")]
+            run_graph(
                 &mut inputs,
                 &kernels,
                 dyn_vars,
@@ -689,27 +805,65 @@ fn cost<'a>(
         // Test runtime
         let mut micros = vec![];
         let mut outputs = vec![];
-        let mut m;
 
         for _ in 0..TRIALS {
-            (outputs, m) = run_graph(
-                &graph,
-                &mut inputs,
-                &kernels,
-                dyn_vars,
-                &compiled_kernels,
-                &int_buffers,
-                &int_buffer_map,
-            );
-            micros.push(m);
+            let (o, m_val) = {
+                #[cfg(feature = "metal")]
+                {
+                    run_graph(
+                        &graph,
+                        &mut inputs,
+                        &kernels,
+                        dyn_vars,
+                        &compiled_kernels,
+                        &int_buffers,
+                        &int_buffer_map,
+                    )
+                }
+
+                #[cfg(feature = "cuda")]
+                {
+                    run_graph(
+                        &mut inputs,
+                        &kernels,
+                        dyn_vars,
+                        &compiled_kernels,
+                        &int_buffers,
+                        &int_buffer_map,
+                    )
+                }
+            };
+            outputs = o;
+            micros.push(m_val);
         }
         Some((
             micros.into_iter().sum::<u128>() / TRIALS as u128,
+            #[cfg(feature = "metal")]
             outputs.iter().map(copy_metal_buffer_back).collect_vec(),
+            #[cfg(feature = "cuda")]
+            outputs.iter().map(copy_cuda_buffer_back).collect_vec(),
         ))
     })
 }
 
+#[cfg(feature = "cuda")]
+pub fn copy_cuda_buffer(v: &[f32], ctx: Arc<CudaContext>) -> CudaSlice<f32> {
+    assert!(!v.is_empty(), "Can't copy empty slice to device");
+
+    // Then copy host data to the allocated device memory
+    let stream = ctx.default_stream();
+    let mut dst = stream.alloc_zeros::<f32>(v.len()).unwrap();
+    stream.memcpy_htod(v, &mut dst).unwrap();
+    dst
+}
+
+/// Device -> Host (like contents() memcpy back)
+#[cfg(feature = "cuda")]
+pub fn copy_cuda_buffer_back(buf: &CudaSlice<f32>) -> Vec<f32> {
+    buf.stream().memcpy_dtov(buf).unwrap()
+}
+
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     assert!(v.len() > 0);
     unsafe {
@@ -723,6 +877,7 @@ pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
             .unwrap()
     }
 }
+#[cfg(feature = "metal")]
 pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
     let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
     let ptr = v.contents().as_ptr() as *mut f32;
@@ -777,143 +932,143 @@ pub fn make_test_inputs(
     inputs
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::{
-//         translate::{MetaGraph, SubGraph, translate_graph_meta},
-//         utils::{build_search_space, display_graph},
-//     };
-//     use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        translate::{translate_graph, MetaGraph, SubGraph},
+        utils::build_search_space,
+    };
+    use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
 
-//     fn create_simple_egraph() -> EGraph {
-//         let egraph = EGraph::default();
-//         egraph
-//     }
+    fn create_simple_egraph() -> EGraph {
+        let egraph = EGraph::default();
+        egraph
+    }
 
-//     fn build_minimal_add_graph() -> (luminal::graph::Graph, MetaGraph, SubGraph) {
-//         use luminal::graph::Graph;
+    fn build_minimal_add_graph() -> (luminal::graph::Graph, MetaGraph, SubGraph) {
+        use luminal::graph::Graph;
 
-//         let mut cx = Graph::new();
-//         let a = cx.tensor(3).set([1., 2., 3.]);
-//         let b = cx.tensor(3).set([4., 5., 6.]);
-//         let c = (a + b).sqrt();
-//         let d = c * a;
-//         let _e = d.sum(0).retrieve();
+        let mut cx = Graph::new();
+        let a = cx.tensor(3).set([1., 2., 3.]);
+        let b = cx.tensor(3).set([4., 5., 6.]);
+        let c = (a + b).sqrt();
+        let d = c * a;
+        let _e = d.sum(0).retrieve();
 
-//         let (meta_graph, _global_map, _inits) = translate_graph_meta(&cx);
-//         let meta_node = meta_graph
-//             .node_indices()
-//             .next()
-//             .expect("MetaGraph unexpectedly empty");
-//         let sub = meta_graph
-//             .node_weight(meta_node)
-//             .expect("Missing subgraph at meta node")
-//             .clone();
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
+        let meta_node = meta_graph
+            .node_indices()
+            .next()
+            .expect("MetaGraph unexpectedly empty");
+        let sub = meta_graph
+            .node_weight(meta_node)
+            .expect("Missing subgraph at meta node")
+            .clone();
 
-//         (cx, meta_graph, sub)
-//     }
+        (cx, meta_graph, sub)
+    }
 
-//     fn build_nonempty_egraph() -> EGraph {
-//         // Keep `cx` and `meta_graph` alive while we build the egraph
-//         let (_cx, meta_graph, sub) = build_minimal_add_graph();
-//         let e = build_search_space(&sub, /*iters=*/ 2);
-//         // `_cx` and `meta_graph` can drop now; `e` no longer needs them
-//         drop(meta_graph);
-//         e
-//     }
+    fn build_nonempty_egraph() -> EGraph {
+        // Keep `cx` and `meta_graph` alive while we build the egraph
+        let (_cx, meta_graph, sub) = build_minimal_add_graph();
+        let e = build_search_space(&sub, /*iters=*/ 2);
+        // `_cx` and `meta_graph` can drop now; `e` no longer needs them
+        drop(meta_graph);
+        e
+    }
 
-//     #[test]
-//     fn test_egraph_is_nonempty_and_has_root() {
-//         let egraph = build_nonempty_egraph();
-//         assert!(!egraph.classes().is_empty(), "EGraph should have classes");
-//         assert!(
-//             !egraph.root_eclasses.is_empty(),
-//             "EGraph should have a root"
-//         );
-//     }
+    #[test]
+    fn test_egraph_is_nonempty_and_has_root() {
+        let egraph = build_nonempty_egraph();
+        assert!(!egraph.classes().is_empty(), "EGraph should have classes");
+        assert!(
+            !egraph.root_eclasses.is_empty(),
+            "EGraph should have a root"
+        );
+    }
 
-//     #[test]
-//     fn test_extract_trajectories_invalid_ir_filtering() {
-//         let egraph = build_nonempty_egraph();
+    #[test]
+    fn test_extract_trajectories_invalid_ir_filtering() {
+        let egraph = build_nonempty_egraph();
 
-//         if egraph.classes().is_empty() || egraph.root_eclasses.is_empty() {
-//             return;
-//         }
+        if egraph.classes().is_empty() || egraph.root_eclasses.is_empty() {
+            return;
+        }
 
-//         let root_class = &egraph.root_eclasses[0];
-//         let mut seen = FxHashMap::default();
-//         let mut junk_cache = FxHashSet::default();
-//         let mut trajectory_cache = FxHashMap::default();
+        let root_class = &egraph.root_eclasses[0];
+        let mut seen = FxHashMap::default();
+        let mut junk_cache = FxHashSet::default();
+        let mut trajectory_cache = FxHashMap::default();
 
-//         let trajectories = extract_trajectories(
-//             &egraph,
-//             root_class,
-//             &mut seen,
-//             &mut junk_cache,
-//             &mut trajectory_cache,
-//             1,
-//         );
+        let trajectories = extract_trajectories(
+            &egraph,
+            root_class,
+            &mut seen,
+            &mut junk_cache,
+            &mut trajectory_cache,
+            1,
+        );
 
-//         // Check that trajectories don't contain INVALID_IR operations
-//         for trajectory in trajectories {
-//             for &node in &trajectory {
-//                 let op_name = &egraph.nodes[node].op;
-//                 assert!(
-//                     !INVALID_IR.contains(&op_name.as_str()),
-//                     "Trajectory contains invalid IR operation: {}",
-//                     op_name
-//                 );
-//             }
-//         }
-//     }
+        // Check that trajectories don't contain INVALID_IR operations
+        for trajectory in trajectories {
+            for &node in &trajectory {
+                let op_name = &egraph.nodes[node].op;
+                assert!(
+                    !INVALID_IR.contains(&op_name.as_str()),
+                    "Trajectory contains invalid IR operation: {}",
+                    op_name
+                );
+            }
+        }
+    }
 
-//     #[test]
-//     #[cfg(target_os = "macos")]
-//     fn test_metal_buffer_operations() {
-//         use metal_rs::Device;
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_metal_buffer_operations() {
+        use metal_rs::Device;
 
-//         // Skip if Metal is not available
-//         if Device::system_default().is_none() {
-//             return;
-//         }
+        // Skip if Metal is not available
+        if Device::system_default().is_none() {
+            return;
+        }
 
-//         let device = Device::system_default().unwrap();
-//         let test_data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let device = Device::system_default().unwrap();
+        let test_data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-//         // Test buffer creation
-//         let buffer = copy_metal_buffer(&test_data, &device);
-//         assert_eq!(
-//             buffer.length(),
-//             (test_data.len() * std::mem::size_of::<f32>()) as u64
-//         );
+        // Test buffer creation
+        let buffer = copy_metal_buffer(&test_data, &device);
+        assert_eq!(
+            buffer.length(),
+            (test_data.len() * std::mem::size_of::<f32>()) as u64
+        );
 
-//         // Test buffer read back
-//         let read_back = copy_metal_buffer_back(&buffer);
-//         assert_eq!(read_back.len(), test_data.len());
+        // Test buffer read back
+        let read_back = copy_metal_buffer_back(&buffer);
+        assert_eq!(read_back.len(), test_data.len());
 
-//         // Verify data integrity
-//         for (original, read) in test_data.iter().zip(&read_back) {
-//             assert!(
-//                 (original - read).abs() < 1e-6,
-//                 "Buffer data should be preserved"
-//             );
-//         }
-//     }
+        // Verify data integrity
+        for (original, read) in test_data.iter().zip(&read_back) {
+            assert!(
+                (original - read).abs() < 1e-6,
+                "Buffer data should be preserved"
+            );
+        }
+    }
 
-//     #[test]
-//     fn test_is_expression_enode() {
-//         // Test that expression enodes are correctly identified
-//         assert!(is_expression_enode("MNum"));
-//         assert!(is_expression_enode("MVar"));
-//         assert!(is_expression_enode("MAdd"));
-//         assert!(is_expression_enode("MNum:42"));
-//         assert!(is_expression_enode("MVar:x"));
+    #[test]
+    fn test_is_expression_enode() {
+        // Test that expression enodes are correctly identified
+        assert!(is_expression_enode("MNum"));
+        assert!(is_expression_enode("MVar"));
+        assert!(is_expression_enode("MAdd"));
+        assert!(is_expression_enode("MNum:42"));
+        assert!(is_expression_enode("MVar:x"));
 
-//         // Test that non-expression enodes are not identified
-//         assert!(!is_expression_enode("GMEM"));
-//         assert!(!is_expression_enode("LoopIn"));
-//         assert!(!is_expression_enode("Add"));
-//         assert!(!is_expression_enode("Invalid"));
-//     }
-// }
+        // Test that non-expression enodes are not identified
+        assert!(!is_expression_enode("GMEM"));
+        assert!(!is_expression_enode("LoopIn"));
+        assert!(!is_expression_enode("Add"));
+        assert!(!is_expression_enode("Invalid"));
+    }
+}
