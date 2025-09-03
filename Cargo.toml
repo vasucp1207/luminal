@@ -39,7 +39,6 @@ members = [
     "crates/luminal_nn",
     "crates/luminal_training",
     "docs/company",
-    #"demos/matmul",
 ]
 exclude = [
     "examples/yolo_v8",
