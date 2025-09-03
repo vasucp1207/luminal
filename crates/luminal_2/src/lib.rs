@@ -8,18 +8,26 @@ pub mod utils;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "cuda")]
+use itertools::Itertools;
 use luminal::prelude::*;
+#[cfg(feature = "cuda")]
+use luminal_cuda::CudaData;
+#[cfg(feature = "metal")]
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLFunction;
+#[cfg(feature = "metal")]
+use objc2_metal::{MTLBuffer, MTLDevice, MTLFunction};
+#[cfg(feature = "cuda")]
+use std::fs::File;
+#[cfg(feature = "cuda")]
+use std::io::Write;
 use std::{collections::HashMap, fmt::Debug};
 
 #[cfg(feature = "metal")]
-pub use objc2::rc::autoreleasepool;
-#[cfg(feature = "metal")]
-pub use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
-
 pub type Device = Retained<ProtocolObject<dyn MTLDevice>>;
+#[cfg(feature = "metal")]
 pub type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+#[cfg(feature = "metal")]
 pub type Function = Retained<ProtocolObject<dyn MTLFunction>>;
 
 #[derive(Clone, PartialEq, Eq)]

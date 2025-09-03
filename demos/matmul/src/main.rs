@@ -1,23 +1,51 @@
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
+#[cfg(feature = "cuda")]
+use cudarc::{driver::*, nvrtc::CompileOptions};
 use itertools::Itertools;
 use luminal::prelude::{
     petgraph::{visit::EdgeRef, Direction},
     *,
 };
 use luminal_2::{
-    autoreleasepool,
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
-    Buffer, Device, GPUArch, GraphTerm, MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLResourceOptions,
+    GPUArch, GraphTerm,
 };
+#[cfg(feature = "metal")]
+use luminal_2::{Buffer, Device};
+#[cfg(feature = "metal")]
+use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use rustc_hash::FxHashMap;
 
+#[cfg(feature = "metal")]
+#[inline]
+fn with_autoreleasepool<F: FnOnce()>(f: F) {
+    objc2::rc::autoreleasepool(|_| f());
+}
+
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
+
+#[cfg(feature = "cuda")]
+#[inline]
+fn with_autoreleasepool<F: FnOnce()>(f: F) {
+    // Non-Apple or no "metal" feature: just run the closure
+    f();
+}
+
 fn main() {
-    autoreleasepool(|_| {
+    with_autoreleasepool(|| {
+        #[cfg(feature = "cuda")]
+        println!("CUDA MODE ENABLED");
+
+        #[cfg(feature = "metal")]
+        let arch = GPUArch::Metal(HashMap::default());
+        #[cfg(feature = "cuda")]
+        let arch = GPUArch::CUDA;
+
         #[allow(non_snake_case)]
         let (M, K, N) = (512, 512, 512);
         let mut cx = Graph::new();
@@ -30,14 +58,8 @@ fn main() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
             // luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
-            let searched_graph = search(
-                graph,
-                3,
-                &inputs,
-                GPUArch::Metal(HashMap::default()),
-                &cx.dyn_map,
-            )
-            .unwrap();
+
+            let searched_graph = search(graph, 3, &inputs, arch.clone(), &cx.dyn_map).unwrap();
             // adjust meta-edges
             let old_output = graph.externals(Direction::Outgoing).next().unwrap();
             let new_output = searched_graph
@@ -100,27 +122,25 @@ fn main() {
         for (k, v) in mapping {
             unified_map.insert(k, meta_to_final[&v]);
         }
-        let (kernels, gmem_mapping) = codegen(
-            graph.clone(),
-            outputs,
-            GPUArch::Metal(HashMap::default()),
-            0,
-            &HashMap::default(),
-        )
-        .unwrap();
+        let (kernels, gmem_mapping) =
+            codegen(graph.clone(), outputs, arch, 0, &HashMap::default()).unwrap();
 
         let compiled = compile_kernels(&kernels);
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
 
-        let device = MTLCreateSystemDefaultDevice().unwrap();
+        #[cfg(feature = "metal")]
+        let device = &MTLCreateSystemDefaultDevice().unwrap();
+        #[cfg(feature = "cuda")]
+        let device = &CudaContext::new(0).unwrap();
+
         let mut inputs = FxHashMap::default();
         inputs.insert(
             gmem_mapping[&unified_map[&a.id]],
-            (copy_metal_buffer(&vec![1.; M * K], &device), false),
+            (copy_buffer(&vec![1.; M * K], device), false),
         );
         inputs.insert(
             gmem_mapping[&unified_map[&b.id]],
-            (copy_metal_buffer(&vec![1.; K * M], &device), false),
+            (copy_buffer(&vec![1.; K * M], device), false),
         );
         for (label, val) in &accs {
             if let Some(node) = gmem_to_node_mapping.get(label) {
@@ -129,30 +149,67 @@ fn main() {
                         let val = e.exec(&cx.dyn_map).unwrap();
                         inputs.insert(gmem_mapping[node], {
                             let v = vec![val as f32];
-                            (copy_metal_buffer(&v, &device), true)
+                            (copy_buffer(&v, device), true)
                         });
                     }
                     InitData::Data(d) => {
-                        inputs.insert(gmem_mapping[node], (copy_metal_buffer(d, &device), true));
+                        inputs.insert(gmem_mapping[node], (copy_buffer(d, device), true));
                     }
                 }
             }
         }
 
-        let (outputs, _) = run_graph(
-            &graph,
-            &mut inputs,
-            &kernels,
-            &FxHashMap::default(),
-            &compiled,
-            &int_buffers,
-            &int_buffer_map,
-        );
-        println!("{:?}", &copy_metal_buffer_back(&outputs[0])[..10]);
+        println!("DIDYOU REACH HERE?");
+
+        let (outputs, _) = {
+            #[cfg(feature = "metal")]
+            {
+                run_graph(
+                    &graph,
+                    &mut inputs,
+                    &kernels,
+                    &FxHashMap::default(),
+                    &compiled,
+                    &int_buffers,
+                    &int_buffer_map,
+                )
+            }
+
+            #[cfg(feature = "cuda")]
+            {
+                run_graph(
+                    &mut inputs,
+                    &kernels,
+                    &FxHashMap::default(),
+                    &compiled,
+                    &int_buffers,
+                    &int_buffer_map,
+                )
+            }
+        };
+        println!("{:?}", &copy_buffer_back(&outputs[0])[..10]);
     });
 }
 
-pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
+#[cfg(feature = "cuda")]
+pub fn copy_buffer(v: &[f32], ctx: &Arc<CudaContext>) -> CudaSlice<f32> {
+    assert!(!v.is_empty(), "Can't copy empty slice to device");
+
+    // Then copy host data to the allocated device memory
+    let stream = ctx.default_stream();
+    let mut dst = stream.alloc_zeros::<f32>(v.len()).unwrap();
+    stream.memcpy_htod(v, &mut dst).unwrap();
+    dst
+}
+
+/// Device -> Host (like contents() memcpy back)
+#[cfg(feature = "cuda")]
+pub fn copy_buffer_back(buf: &CudaSlice<f32>) -> Vec<f32> {
+    buf.stream().memcpy_dtov(buf).unwrap()
+}
+
+#[cfg(feature = "metal")]
+pub fn copy_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     unsafe {
         device
             .newBufferWithBytes_length_options(
@@ -164,7 +221,8 @@ pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     }
 }
 
-pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
+#[cfg(feature = "metal")]
+pub fn copy_buffer_back(v: &Buffer) -> Vec<f32> {
     let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
     let ptr = v.contents().as_ptr() as *mut f32;
     for (i, d) in data.iter_mut().enumerate() {

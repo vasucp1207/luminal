@@ -270,6 +270,7 @@ pub fn codegen(
                         ", threadgroup float* sm [[threadgroup(0)]]".to_string(),
                     )
                 };
+                // println!("is this getting reached?");
 
                 format!(
                     "#include <metal_stdlib>
@@ -901,6 +902,11 @@ fn make_kernel(
                 c_inner_stride,
                 k_outer_loops,
             } => {
+                if cfg!(feature = "cuda") {
+                    // CUDA build: skip / fallback
+                    return None; // or generate a non-TC matmul
+                }
+
                 let mut srcs = kernel_graph
                     .edges_directed(node, Direction::Incoming)
                     .sorted_by_key(|e| e.id())
