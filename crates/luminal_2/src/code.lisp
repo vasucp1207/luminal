@@ -523,19 +523,14 @@
 	(saturate expr)
 )
 (run-schedule
-	(run ir)
-	(saturate ir-prop)
-	(saturate expr)
-	(saturate cleanup)
+	(let-scheduler bo (back-off))
+	(repeat 2
+		(run-with bo ir)
+		(saturate ir-prop)
+		(saturate expr)
+		(saturate cleanup)
+	)
 )
-;(print-size)
-(run-schedule
-	(run ir)
-	(saturate ir-prop)
-	(saturate expr)
-	(saturate cleanup)
-)
-;(print-size)
 (run-schedule
 	(saturate ir-generic)
 	(saturate tc)

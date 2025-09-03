@@ -1,13 +1,13 @@
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::usize;
 
+use crate::Kernel;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
-use crate::Kernel;
 #[cfg(feature = "metal")]
 use crate::{Buffer, Device};
 use crate::{GPUArch, GraphTerm};
@@ -18,13 +18,13 @@ use colored::Colorize;
 use cudarc::driver::{CudaContext, CudaSlice, DriverError};
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
+use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
-use luminal::prelude::NodeIndex;
 use luminal::shape::{Expression, Term};
 #[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
@@ -128,11 +128,7 @@ fn shortest_from_enode<'a>(
             }
         }
 
-        if ok {
-            Some(acc)
-        } else {
-            None
-        }
+        if ok { Some(acc) } else { None }
     };
 
     *seen.get_mut(&enode).unwrap() -= 1;
@@ -764,7 +760,7 @@ fn cost<'a>(
         let device = MTLCreateSystemDefaultDevice().unwrap();
         #[cfg(feature = "cuda")]
         let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
-                                                // Copy input buffers over
+        // Copy input buffers over
         let mut inputs = inputs
             .into_iter()
             .map(|(n, b)| {
@@ -936,15 +932,9 @@ pub fn make_test_inputs(
 mod tests {
     use super::*;
     use crate::{
-        translate::{translate_graph, MetaGraph, SubGraph},
+        translate::{MetaGraph, SubGraph, translate_graph},
         utils::build_search_space,
     };
-    use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
-
-    fn create_simple_egraph() -> EGraph {
-        let egraph = EGraph::default();
-        egraph
-    }
 
     fn build_minimal_add_graph() -> (luminal::graph::Graph, MetaGraph, SubGraph) {
         use luminal::graph::Graph;
@@ -1020,39 +1010,6 @@ mod tests {
                     op_name
                 );
             }
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_metal_buffer_operations() {
-        use metal_rs::Device;
-
-        // Skip if Metal is not available
-        if Device::system_default().is_none() {
-            return;
-        }
-
-        let device = Device::system_default().unwrap();
-        let test_data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-
-        // Test buffer creation
-        let buffer = copy_metal_buffer(&test_data, &device);
-        assert_eq!(
-            buffer.length(),
-            (test_data.len() * std::mem::size_of::<f32>()) as u64
-        );
-
-        // Test buffer read back
-        let read_back = copy_metal_buffer_back(&buffer);
-        assert_eq!(read_back.len(), test_data.len());
-
-        // Verify data integrity
-        for (original, read) in test_data.iter().zip(&read_back) {
-            assert!(
-                (original - read).abs() < 1e-6,
-                "Buffer data should be preserved"
-            );
         }
     }
 

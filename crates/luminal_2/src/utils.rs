@@ -484,7 +484,7 @@ pub fn render_egglog_inline(
 /// Runs an Egglog program from a string and returns its output messages.
 fn run_egglog_program(code: &str, root: &str) -> Result<egraph_serialize::EGraph, Error> {
     // Create a fresh EGraph with all the defaults
-    let mut egraph = EGraph::default();
+    let mut egraph = egglog_experimental::new_experimental_egraph();
     let commands = egraph.parser.get_program_from_string(None, code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;

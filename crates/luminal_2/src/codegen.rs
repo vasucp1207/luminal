@@ -1528,7 +1528,7 @@ pub fn stitch_meta_graph_together(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GPUArch, GraphTerm, Kernel, translate::SubGraph};
+    use crate::{GPUArch, GraphTerm, translate::SubGraph};
     use std::collections::HashMap;
 
     #[test]
@@ -1537,15 +1537,6 @@ mod tests {
         assert_eq!(var_to_char(25), "z");
         assert_eq!(var_to_char(26), "ba");
         assert_eq!(var_to_char(27), "bb");
-    }
-
-    #[test]
-    fn test_max_constants() {
-        assert_eq!(MAX_THREADBLOCK_SIZE, 1024);
-        assert_eq!(MAX_GRID_X, 2147483647);
-        assert_eq!(MAX_GRID_YZ, 65535);
-        assert_eq!(GRID_DIMS, 2);
-        assert_eq!(THREADBLOCK_DIMS, 1);
     }
 
     #[test]

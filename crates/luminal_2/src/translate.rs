@@ -533,9 +533,6 @@ fn scope_out(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use luminal::op::*;
-    use luminal::prelude::*;
-    use rustc_hash::FxHashMap;
 
     fn create_test_graph() -> Graph {
         let mut cx = Graph::new();

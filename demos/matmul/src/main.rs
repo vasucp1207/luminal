@@ -27,20 +27,13 @@ fn with_autoreleasepool<F: FnOnce()>(f: F) {
 }
 
 #[cfg(feature = "cuda")]
-use std::sync::Arc;
-
-#[cfg(feature = "cuda")]
 #[inline]
 fn with_autoreleasepool<F: FnOnce()>(f: F) {
-    // Non-Apple or no "metal" feature: just run the closure
     f();
 }
 
 fn main() {
     with_autoreleasepool(|| {
-        #[cfg(feature = "cuda")]
-        println!("CUDA MODE ENABLED");
-
         #[cfg(feature = "metal")]
         let arch = GPUArch::Metal(HashMap::default());
         #[cfg(feature = "cuda")]
@@ -190,7 +183,7 @@ fn main() {
 }
 
 #[cfg(feature = "cuda")]
-pub fn copy_buffer(v: &[f32], ctx: &Arc<CudaContext>) -> CudaSlice<f32> {
+pub fn copy_buffer(v: &[f32], ctx: &std::sync::Arc<CudaContext>) -> CudaSlice<f32> {
     assert!(!v.is_empty(), "Can't copy empty slice to device");
 
     // Then copy host data to the allocated device memory
