@@ -521,12 +521,22 @@
 (run-schedule
 	(saturate ir-generic)
 	(saturate expr)
-	(repeat 2
-		(run ir)
-		(saturate ir-prop)
-		(saturate expr)
-		(saturate cleanup) ; i don't know if this does anything
-	)
+)
+(run-schedule
+	(run ir)
+	(saturate ir-prop)
+	(saturate expr)
+	(saturate cleanup)
+)
+;(print-size)
+(run-schedule
+	(run ir)
+	(saturate ir-prop)
+	(saturate expr)
+	(saturate cleanup)
+)
+;(print-size)
+(run-schedule
 	(saturate ir-generic)
 	(saturate tc)
 )

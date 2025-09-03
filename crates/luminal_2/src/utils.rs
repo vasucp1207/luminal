@@ -175,7 +175,7 @@ pub fn build_search_space(
     if option_env!("SAVE_EGGLOG").is_some() {
         std::fs::write("egglog.txt", &final_code).unwrap();
     }
-    let (_egglog_messages, serialized) = run_egglog_program(&final_code, &root).unwrap();
+    let serialized = run_egglog_program(&final_code, &root).unwrap();
     if option_env!("DEBUG").is_some() {
         println!("Done building search space.");
     }
@@ -482,10 +482,7 @@ pub fn render_egglog_inline(
 }
 
 /// Runs an Egglog program from a string and returns its output messages.
-fn run_egglog_program(
-    code: &str,
-    root: &str,
-) -> Result<(Vec<CommandOutput>, egraph_serialize::EGraph), Error> {
+fn run_egglog_program(code: &str, root: &str) -> Result<egraph_serialize::EGraph, Error> {
     // Create a fresh EGraph with all the defaults
     let mut egraph = EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, code)?;
@@ -514,8 +511,12 @@ fn run_egglog_program(
             s.egraph.root_eclasses.len(),
             s.egraph.class_data.len()
         );
+        println!("Messages:");
+        for m in msgs {
+            println!("{m}");
+        }
     }
-    Ok((msgs, s.egraph))
+    Ok(s.egraph)
 }
 
 pub fn print_kernels(kernels: &StableGraph<Kernel, (usize, usize), Directed>) -> String {
