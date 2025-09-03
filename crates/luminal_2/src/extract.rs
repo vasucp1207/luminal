@@ -1,13 +1,13 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::usize;
 
-use crate::Kernel;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
+use crate::Kernel;
 #[cfg(feature = "metal")]
 use crate::{Buffer, Device};
 use crate::{GPUArch, GraphTerm};
@@ -18,15 +18,13 @@ use colored::Colorize;
 use cudarc::driver::{CudaContext, CudaSlice, DriverError};
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
-use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
+use luminal::prelude::NodeIndex;
 use luminal::shape::{Expression, Term};
 #[cfg(feature = "metal")]
-use objc2::rc::autoreleasepool;
-#[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
-use rand::{Rng, rng};
+use rand::{rng, Rng};
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
@@ -130,7 +128,11 @@ fn shortest_from_enode<'a>(
             }
         }
 
-        if ok { Some(acc) } else { None }
+        if ok {
+            Some(acc)
+        } else {
+            None
+        }
     };
 
     *seen.get_mut(&enode).unwrap() -= 1;
@@ -762,7 +764,7 @@ fn cost<'a>(
         let device = MTLCreateSystemDefaultDevice().unwrap();
         #[cfg(feature = "cuda")]
         let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
-        // Copy input buffers over
+                                                // Copy input buffers over
         let mut inputs = inputs
             .into_iter()
             .map(|(n, b)| {
@@ -934,7 +936,7 @@ pub fn make_test_inputs(
 mod tests {
     use super::*;
     use crate::{
-        translate::{MetaGraph, SubGraph, translate_graph},
+        translate::{translate_graph, MetaGraph, SubGraph},
         utils::build_search_space,
     };
     use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
