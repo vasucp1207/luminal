@@ -159,8 +159,6 @@ fn main() {
             }
         }
 
-        println!("DIDYOU REACH HERE?");
-
         let (outputs, _) = {
             #[cfg(feature = "metal")]
             {
