@@ -40,17 +40,18 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N, J) = (64, 512, 64, 64);
+        let (M, K, N, J) = (64, 512, 512, 64);
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
         let c = cx.named_tensor("C", (N, J));
         let out = a.matmul(b).matmul(c);
+
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            // luminal_2::debug::display_graph(&graph);
+            luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
 
             let searched_graph = search(graph, 3, &inputs, arch.clone(), &cx.dyn_map).unwrap();
@@ -106,6 +107,7 @@ fn main() {
         }
         let outputs = vec![mapping[&out.id]];
         let (graph, meta_to_final, outputs) = stitch_meta_graph_together(new_graph, outputs);
+        luminal_2::debug::display_graph(&graph);
         let mut gmem_to_node_mapping = FxHashMap::default();
         for n in graph.node_indices() {
             if let Some(GraphTerm::GMEM { label }) = graph.node_weight(n) {

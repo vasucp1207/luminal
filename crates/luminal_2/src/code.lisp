@@ -105,8 +105,8 @@
 
    	; tensor core stuff
    	(TCMatmul IR IR Expression Expression Expression Expression Expression Expression) ; input A, input B, A k stride, B k stride, A inner stride, B inner stride, C inner stride, number of K tile loops
-   	(TiledMatmulInputA String i64 Expression)
-    (TiledMatmulInputB String i64 Expression)
+   	(TiledMatmulInputA IR i64 Expression)
+    (TiledMatmulInputB IR i64 Expression)
 )
 
 ; -------------- HELPERS ---------------
@@ -348,7 +348,7 @@
 	(LoopIn ; k
 		(LoopIn ; n
 			(LoopIn ; m
-				(GMEM ?a)
+				?a
 				(Loop ?loop_a_mtile (MNum ?m))
 				(MMul (MVar "z") (MNum ?k))
 			)
@@ -359,14 +359,14 @@
 		(MVar "z")
 	)
 	(TiledMatmulInputA ?a ?k (MNum (/ ?k 8)))
-	:when ((= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
+	:when ((= (loop_level ?a) 0) (= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
 	:ruleset tc
 )
 (rewrite
 	(LoopIn ; k
 		(LoopIn ; n
 			(LoopIn ; m
-				(GMEM ?b)
+				?b
 				(Loop ?loop_b_mtile (MNum ?m))
 				(MNum 0)
 			)
@@ -377,7 +377,7 @@
 		(MMul (MVar "z") (MNum ?n))
 	)
 	(TiledMatmulInputB ?b ?n (MNum (/ ?k 8)))
-	:when ((= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
+	:when ((= (loop_level ?b) 0) (= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
 	:ruleset tc
 )
 (rewrite
@@ -390,9 +390,9 @@
 						(TiledMatmulInputB ?b ?n ?k_loops)
 					))
 					; accumulator
-					(LoopIn ; k outer
-						(LoopIn ; n tile
-							(LoopIn ; m tile
+					(LoopIn ; k
+						(LoopIn ; n
+							(LoopIn ; m
 								?acc
 								(Loop ?loop_acc_mtile (MNum ?m))
 								(MNum 0)
@@ -423,7 +423,7 @@
 							(LoopIn ; m tile
 								(LoopIn ; n outer
 									(LoopIn ; m outer
-										(GMEM ?a)
+										?a
 										(Loop ?loop_out_m (MNum (/ ?m 8)))
 										(MMul (MVar "z") (MNum (* ?k 8)))
 									)
@@ -441,7 +441,7 @@
 							(LoopIn ; m tile
 								(LoopIn ; n outer
 									(LoopIn ; m outer
-										(GMEM ?b)
+										?b
 										(Loop ?loop_out_m (MNum (/ ?m 8)))
 										(MNum 0)
 									)
@@ -560,22 +560,13 @@
 {code}
 (run-schedule
 	(saturate expr)
-)
-(run-schedule
 	(let-scheduler bo (back-off))
 	(repeat 1
 		(run-with bo ir)
 		(saturate ir-prop)
 		(saturate expr)
-		(saturate cleanup)
+		;(saturate cleanup)
 	)
-)
-(print-size)
-(run-schedule
 	(saturate tc)
+	(saturate ir-prop)
 )
-
-;(ruleset loop-blank)
-;(rewrite (Loop ?s ?r) (Loop "" ?r) :ruleset loop-blank)
-;(rewrite (MergeLoops ?x ?r ?y) (MergeLoops ?x "" "") :ruleset loop-blank)
-;(run-schedule (run loop-blank))
