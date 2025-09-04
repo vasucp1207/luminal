@@ -129,8 +129,8 @@
 ; Communative binary ops
 (rewrite (Binary ?bin ?a ?b) (Binary ?bin ?b ?a) :ruleset ir)
 ; distributive/associative skeletons so sums and products re-associate
-(rewrite (Add (Add ?a ?b) ?c) (Add ?a (Add ?b ?c)) :ruleset ir)
-(rewrite (Mul (Mul ?a ?b) ?c) (Mul ?a (Mul ?b ?c)) :ruleset ir)
+;(rewrite (Add (Add ?a ?b) ?c) (Add ?a (Add ?b ?c)) :ruleset ir)
+;(rewrite (Mul (Mul ?a ?b) ?c) (Mul ?a (Mul ?b ?c)) :ruleset ir)
 
 ; set containing maccums
 (sort ExpressionSetBase (Set Expression))
@@ -524,13 +524,14 @@
 )
 (run-schedule
 	(let-scheduler bo (back-off))
-	(repeat 2
+	(repeat 1
 		(run-with bo ir)
 		(saturate ir-prop)
 		(saturate expr)
 		(saturate cleanup)
 	)
 )
+(print-size)
 (run-schedule
 	(saturate ir-generic)
 	(saturate tc)

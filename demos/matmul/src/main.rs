@@ -40,11 +40,12 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N) = (512, 512, 512);
+        let (M, K, N, J) = (64, 512, 64, 64);
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
-        let out = a.matmul(b);
+        let c = cx.named_tensor("C", (N, J));
+        let out = a.matmul(b).matmul(c);
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
@@ -113,7 +114,9 @@ fn main() {
         }
         let mut unified_map = FxHashMap::default();
         for (k, v) in mapping {
-            unified_map.insert(k, meta_to_final[&v]);
+            if let Some(m) = meta_to_final.get(&v) {
+                unified_map.insert(k, *m);
+            }
         }
         let (kernels, gmem_mapping) =
             codegen(graph.clone(), outputs, arch, 0, &HashMap::default()).unwrap();
@@ -133,7 +136,11 @@ fn main() {
         );
         inputs.insert(
             gmem_mapping[&unified_map[&b.id]],
-            (copy_buffer(&vec![1.; K * M], device), false),
+            (copy_buffer(&vec![1.; K * N], device), false),
+        );
+        inputs.insert(
+            gmem_mapping[&unified_map[&c.id]],
+            (copy_buffer(&vec![1.; K * J], device), false),
         );
         for (label, val) in &accs {
             if let Some(node) = gmem_to_node_mapping.get(label) {
