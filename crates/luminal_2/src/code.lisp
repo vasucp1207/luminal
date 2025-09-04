@@ -129,62 +129,88 @@
   ((set (MAccumSet) (set-of ?e)))
   :ruleset ir-prop)
 
-(function loop_level (IR) i64 :no-merge)
-
+(function loop_level (IR) i64 :merge new)
+; GMEM (0) -> loopin (0)
 (rule
+	((= out (LoopIn (GMEM g) l1 r1)))
 	(
-		(= higher (LoopIn lower l1 s1))
-		(= lower (LoopIn x l2 s2))
-		(= ll (loop_level lower))
+		(set (loop_level out) 0)
+		(set (loop_level (GMEM g)) 0)
 	)
-	((set (loop_level higher) (+ ll 1)))
 	:ruleset ir-prop
 )
+; non-loopin (n) -> loopout (n - 1)
 (rule
 	(
-		(= lower (LoopOut higher l1 r1))
-		(= higher (LoopOut x l2 r2))
-		(= ll (loop_level higher))
+		(= curr (LoopOut x l1 r1))
+		(!= x (LoopIn y l2 r2))
+		(= xll (loop_level x))
 	)
-	((set (loop_level lower) (- ll 1)))
+	((set (loop_level curr) (- xll 1)))
 	:ruleset ir-prop
 )
+; loopin (n) -> binary (n + 1)
 (rule
 	(
-		(= out (LoopOut (LoopIn in l1 r1) l2 r2))
-		(= ll (loop_level in))
+		(= curr (Binary bin x z))
+		(= x (LoopIn y l1 r1))
+		(= xll (loop_level x))
 	)
-	((set (loop_level out) ll))
+	((set (loop_level curr) (+ xll 1)))
+	:ruleset ir-prop
+)
+; loopin (n) -> unary (n + 1)
+(rule
+	(
+		(= curr (Unary un x))
+		(= x (LoopIn y l1 r1))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) (+ xll 1)))
+	:ruleset ir-prop
+)
+; loopin (n) -> loopin (n + 1)
+(rule
+	(
+		(= curr (LoopIn x l2 r2))
+		(= x (LoopIn y l1 r1))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) (+ xll 1)))
+	:ruleset ir-prop
+)
+; loopin (n) -> loopout(n)
+(rule
+	(
+		(= curr (LoopOut x l1 r1))
+		(= x (LoopIn y l2 r2))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) xll))
+	:ruleset ir-prop
+)
+; non-loopin -> binary
+(rule
+	(
+		(= curr (Binary bin a b))
+		(!= a (LoopIn c l2 r2))
+		(= xll (loop_level a))
+	)
+	((set (loop_level curr) xll))
+	:ruleset ir-prop
+)
+; non-loopin -> unary
+(rule
+	(
+		(= curr (Unary un a))
+		(!= a (LoopIn c l2 r2))
+		(= xll (loop_level a))
+	)
+	((set (loop_level curr) xll))
 	:ruleset ir-prop
 )
 
 ; ---------- RULES ----------
-
-; remove pad loop
-(rewrite
- 	(LoopOut (Unary ?un (LoopIn ?x (Loop ?loop (MNum 1)) (MNum 0))) (Loop ?loop (MNum 1)) (MNum 0))
-	(Unary ?un ?x)
-	 ;:ruleset ir
-)
-(rewrite
- 	(LoopOut (Binary ?bin (LoopIn ?a (Loop ?loop (MNum 1)) (MNum 0)) (LoopIn ?b (Loop ?loop (MNum 1)) (MNum  0))) (Loop ?loop (MNum 1)) (MNum 0))
-	(Binary ?bin ?a ?b)
-	 ;:ruleset ir
-)
-; add pad loop
-(rewrite
-	(LoopOut (Unary ?un ?x) (Loop ?l ?r) ?s)
-	(LoopOut (LoopOut (Unary ?un (LoopIn ?x (Loop "newpad" (MNum 1)) (MNum 0))) (Loop "newpad" (MNum 1)) (MNum 0)) (Loop ?l ?r) ?s)
-	:when ((!= ?r (MNum 1)) (!= ?s (MNum 0)))
-	;:ruleset ir
-)
-(rewrite
-	(LoopOut (Binary ?bin ?a ?b) (Loop ?l ?r) ?s)
-	(LoopOut (LoopOut (Binary ?bin (LoopIn ?a (Loop "newpad" (MNum 1)) (MNum 0)) (LoopIn ?b (Loop "newpad" (MNum 1)) (MNum 0))) (Loop "newpad" (MNum 1)) (MNum 0)) (Loop ?l ?r) ?s)
-	:when ((!= ?r (MNum 1)) (!= ?s (MNum 0)))
-	;:ruleset ir
-)
-
 
 ; Loop Fusion
 (rewrite

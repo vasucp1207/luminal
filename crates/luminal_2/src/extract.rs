@@ -42,6 +42,7 @@ const INVALID_IR: &[&str] = &[
     "TiledMatmulInputA",
     "TiledMatmulInputB",
     "TiledMatmulAcc",
+    "loop_level",
 ];
 
 #[cfg(feature = "metal")]
