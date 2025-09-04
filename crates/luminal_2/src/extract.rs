@@ -1,13 +1,13 @@
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::usize;
 
+use crate::Kernel;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
-use crate::Kernel;
 #[cfg(feature = "metal")]
 use crate::{Buffer, Device};
 use crate::{GPUArch, GraphTerm};
@@ -18,13 +18,13 @@ use colored::Colorize;
 use cudarc::driver::{CudaContext, CudaSlice, DriverError};
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
+use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
-use luminal::prelude::NodeIndex;
 use luminal::shape::{Expression, Term};
 #[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
@@ -37,8 +37,6 @@ const INVALID_IR: &[&str] = &[
     "SwapLoops",
     "TileLoop",
     "UnpadLoop",
-    "Unary",
-    "Binary",
     "MReplace",
     "MergeLoops",
     "TiledMatmulInputA",
@@ -128,11 +126,7 @@ fn shortest_from_enode<'a>(
             }
         }
 
-        if ok {
-            Some(acc)
-        } else {
-            None
-        }
+        if ok { Some(acc) } else { None }
     };
 
     *seen.get_mut(&enode).unwrap() -= 1;
@@ -530,6 +524,7 @@ pub fn extraction_to_graph(
     enum Ret {
         Expr(NodeIndex),
         Math(Expression),
+        Op(GraphTerm),
     }
 
     fn recurse(
@@ -630,9 +625,11 @@ pub fn extraction_to_graph(
                 g.add_edge(src_b, r, ());
                 Ret::Expr(r)
             }
-
-            "Add" | "Mul" | "Max" | "SMEMLoad" | "SMEMRead" => {
+            "Binary" => {
                 *current += 1;
+                let Ret::Op(op) = recurse(egraph, trajectory, current, g) else {
+                    panic!()
+                };
                 let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
                     panic!()
                 };
@@ -640,24 +637,35 @@ pub fn extraction_to_graph(
                 let Ret::Expr(child_two) = recurse(egraph, trajectory, current, g) else {
                     panic!()
                 };
-                let r = g.add_node(match enode.op.as_str() {
-                    "SMEMLoad" => GraphTerm::SMEMLoad,
-                    "SMEMRead" => GraphTerm::SMEMRead,
-                    "Add" => GraphTerm::Add,
-                    "Mul" => GraphTerm::Mul,
-                    "Max" => GraphTerm::Max,
-                    _ => panic!(),
-                });
+                let r = g.add_node(op);
                 g.add_edge(child_one, r, ());
                 g.add_edge(child_two, r, ());
                 Ret::Expr(r)
             }
-            "Exp2" | "Sin" | "Recip" | "Neg" | "Sqrt" => {
+            "Add" | "Mul" | "Max" => {
                 *current += 1;
+                Ret::Op(match enode.op.as_str() {
+                    "Add" => GraphTerm::Add,
+                    "Mul" => GraphTerm::Mul,
+                    "Max" => GraphTerm::Max,
+                    _ => panic!(),
+                })
+            }
+            "Unary" => {
+                *current += 1;
+                let Ret::Op(op) = recurse(egraph, trajectory, current, g) else {
+                    panic!()
+                };
                 let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
                     panic!()
                 };
-                let r = g.add_node(match enode.op.as_str() {
+                let r = g.add_node(op);
+                g.add_edge(child_one, r, ());
+                Ret::Expr(r)
+            }
+            "Exp2" | "Sin" | "Recip" | "Neg" | "Sqrt" => {
+                *current += 1;
+                Ret::Op(match enode.op.as_str() {
                     "Exp2" => GraphTerm::Exp2,
                     "Log2" => GraphTerm::Log2,
                     "Sin" => GraphTerm::Sin,
@@ -665,9 +673,7 @@ pub fn extraction_to_graph(
                     "Neg" => GraphTerm::Neg,
                     "Sqrt" => GraphTerm::Sqrt,
                     _ => panic!(),
-                });
-                g.add_edge(child_one, r, ());
-                Ret::Expr(r)
+                })
             }
             "Fused" => {
                 *current += 1;
@@ -765,7 +771,7 @@ fn cost<'a>(
         let device = MTLCreateSystemDefaultDevice().unwrap();
         #[cfg(feature = "cuda")]
         let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
-                                                // Copy input buffers over
+        // Copy input buffers over
         let mut inputs = inputs
             .into_iter()
             .map(|(n, b)| {
@@ -937,7 +943,7 @@ pub fn make_test_inputs(
 mod tests {
     use super::*;
     use crate::{
-        translate::{translate_graph, MetaGraph, SubGraph},
+        translate::{MetaGraph, SubGraph, translate_graph},
         utils::build_search_space,
     };
 

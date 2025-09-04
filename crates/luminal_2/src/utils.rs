@@ -323,9 +323,9 @@ pub fn render_egglog(
                     _ => unreachable!(),
                 };
                 if ops.len() == 1 {
-                    format!("({op} {})", ops.pop().unwrap())
+                    format!("(Unary ({op}) {})", ops.pop().unwrap())
                 } else {
-                    format!("({op} {})", ops.join(" "))
+                    format!("(Binary ({op}) {})", ops.join(" "))
                 }
             }
         };

@@ -68,33 +68,29 @@
 ; -------- IR --------
 (ruleset ir)
 (ruleset ir-prop)
-(ruleset ir-generic)
 (datatype LoopType (Loop String Expression))
+(datatype UnOp
+	(Exp2)
+	(Log2)
+	(Sqrt)
+	(Sin)
+	(Recip)
+	(Neg)
+)
+(datatype BinOp
+	(Add)
+	(Mul)
+	(Max)
+)
 (datatype IR
 	; General kernel stuff
    	(GMEM String)
    	(LoopIn IR LoopType Expression)
    	(LoopOut IR LoopType Expression)
-   	(SMEM)
-   	(SMEMLoad IR IR)
-    (SMEMRead IR IR)
-
-    ; Unary Ops
-   	(Exp2 IR)
-   	(Log2 IR)
-   	(Sqrt IR)
-   	(Sin IR)
-   	(Recip IR)
-   	(Neg IR)
-
-    ; Binary Ops
-   	(Add IR IR)
-   	(Mul IR IR)
-   	(Max IR IR)
 
     ; search helpers
-    (Unary String IR)
-   	(Binary String IR IR)
+    (Unary UnOp IR)
+   	(Binary BinOp IR IR)
 
    	; propogation patterns
    	(SwapLoops IR String String) ; Swap two loops, identified by their strings
@@ -115,17 +111,6 @@
 
 ; -------------- HELPERS ---------------
 
-; Convert to and from generic unary ops
-(birewrite (Exp2 ?x) (Unary "Exp2" ?x) :ruleset ir-generic)
-(birewrite (Log2 ?x) (Unary "Log2" ?x) :ruleset ir-generic)
-(birewrite (Sqrt ?x) (Unary "Sqrt" ?x) :ruleset ir-generic)
-(birewrite (Sin ?x) (Unary "Sin" ?x) :ruleset ir-generic)
-(birewrite (Recip ?x) (Unary "Recip" ?x) :ruleset ir-generic)
-(birewrite (Neg ?x) (Unary "Neg" ?x) :ruleset ir-generic)
-(birewrite (Add ?a ?b) (Binary "Add" ?a ?b) :ruleset ir-generic)
-(birewrite (Mul ?a ?b) (Binary "Mul" ?a ?b) :ruleset ir-generic)
-(birewrite (Max ?a ?b) (Binary "Max" ?a ?b) :ruleset ir-generic)
-
 ; Communative binary ops
 (rewrite (Binary ?bin ?a ?b) (Binary ?bin ?b ?a) :ruleset ir)
 ; distributive/associative skeletons so sums and products re-associate
@@ -143,6 +128,35 @@
 (rule ((= ?e (MAccum ?s)))
   ((set (MAccumSet) (set-of ?e)))
   :ruleset ir-prop)
+
+(function loop_level (IR) i64 :no-merge)
+
+(rule
+	(
+		(= higher (LoopIn lower l1 s1))
+		(= lower (LoopIn x l2 s2))
+		(= ll (loop_level lower))
+	)
+	((set (loop_level higher) (+ ll 1)))
+	:ruleset ir-prop
+)
+(rule
+	(
+		(= lower (LoopOut higher l1 r1))
+		(= higher (LoopOut x l2 r2))
+		(= ll (loop_level higher))
+	)
+	((set (loop_level lower) (- ll 1)))
+	:ruleset ir-prop
+)
+(rule
+	(
+		(= out (LoopOut (LoopIn in l1 r1) l2 r2))
+		(= ll (loop_level in))
+	)
+	((set (loop_level out) ll))
+	:ruleset ir-prop
+)
 
 ; ---------- RULES ----------
 
@@ -344,8 +358,8 @@
 	(LoopOut ; m
 		(LoopOut ; n
 			 (LoopOut ; k
-				(Add
-					(Fused (Mul
+				(Binary (Add)
+					(Fused (Binary (Mul)
 						(TiledMatmulInputA ?a ?k ?k_loops)
 						(TiledMatmulInputB ?b ?n ?k_loops)
 					))
@@ -519,7 +533,6 @@
 
 {code}
 (run-schedule
-	(saturate ir-generic)
 	(saturate expr)
 )
 (run-schedule
@@ -533,7 +546,6 @@
 )
 (print-size)
 (run-schedule
-	(saturate ir-generic)
 	(saturate tc)
 )
 
