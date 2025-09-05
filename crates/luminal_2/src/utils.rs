@@ -176,7 +176,7 @@ pub fn build_search_space(
         std::fs::write("egglog.txt", &final_code).unwrap();
     }
     let serialized = run_egglog_program(&final_code, &root).unwrap();
-    if option_env!("DEBUG").is_some() {
+    if option_env!("DEBUG").is_some() || option_env!("PRINT_EGGLOG").is_some() {
         println!("Done building search space.");
     }
     serialized

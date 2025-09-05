@@ -1103,3 +1103,47 @@ impl TermToString for (GraphTerm, Vec<String>, Vec<usize>) {
         )
     }
 }
+
+/// View a debug graph in the browser
+pub fn display_graph2(
+    graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>,
+    mark_nodes: &[(NodeIndex, &str)],
+) {
+    let mut new_graph = StableGraph::new();
+    let mut map = std::collections::HashMap::new();
+    for node in graph.node_indices() {
+        map.insert(
+            node,
+            new_graph.add_node(graph.node_weight(node).unwrap().term_to_string().0),
+        );
+    }
+    for edge in graph.edge_indices() {
+        let weight = graph.edge_weight(edge).unwrap();
+        let (src, dest) = graph.edge_endpoints(edge).unwrap();
+        new_graph.add_edge(map[&src], map[&dest], weight.edge_to_string());
+    }
+    let mut graph_string = luminal::prelude::petgraph::dot::Dot::with_config(
+        &new_graph,
+        &[luminal::prelude::petgraph::dot::Config::EdgeIndexLabel],
+    )
+    .to_string();
+    let re = regex::Regex::new(r#"label\s*=\s*"\d+""#).unwrap();
+    graph_string = re.replace_all(&graph_string, "").to_string();
+    for (n, color) in mark_nodes {
+        graph_string = graph_string.replace(
+            &format!("    {} [ label =", n.index()),
+            &format!(
+                "    {} [ style=\"filled\" fillcolor=\"{color}\" label =",
+                n.index(),
+            ),
+        );
+    }
+
+    let url = format!(
+        "https://dreampuf.github.io/GraphvizOnline/#{}",
+        urlencoding::encode(&graph_string)
+    );
+    if let Err(e) = webbrowser::open(&url) {
+        panic!("Error displaying graph: {:?}", e);
+    }
+}

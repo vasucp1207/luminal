@@ -12,7 +12,6 @@ use luminal_2::{
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
-    utils::render_egglog,
     GPUArch, GraphTerm,
 };
 #[cfg(feature = "metal")]
@@ -41,15 +40,15 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N, J) = (64, 64, 512, 512);
+        let (M, K, N, J) = (100000, 512, 512, 512);
         let mut cx = Graph::new();
-        let a = cx.named_tensor("A", (M, K));
-        let b = cx.named_tensor("B", (K, N));
-        let c = cx.named_tensor("C", (N, J));
-        let out = a.matmul(b).matmul(c);
+        let a = cx.named_tensor("A", (M));
+        // let b = cx.named_tensor("B", (K, N));
+        // let c = cx.named_tensor("C", (N, J));
+        let out = a.swish();
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
-        // display_multiple_graphs(&new_graph.node_weights().collect_vec());
+        // luminal_2::debug::display_multiple_graphs(&new_graph.node_weights().collect_vec());
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
@@ -137,14 +136,14 @@ fn main() {
             gmem_mapping[&unified_map[&a.id]],
             (copy_buffer(&vec![1.; M * K], device), false),
         );
-        inputs.insert(
-            gmem_mapping[&unified_map[&b.id]],
-            (copy_buffer(&vec![1.; K * N], device), false),
-        );
-        inputs.insert(
-            gmem_mapping[&unified_map[&c.id]],
-            (copy_buffer(&vec![1.; K * J], device), false),
-        );
+        // inputs.insert(
+        //     gmem_mapping[&unified_map[&b.id]],
+        //     (copy_buffer(&vec![1.; K * N], device), false),
+        // );
+        // inputs.insert(
+        //     gmem_mapping[&unified_map[&c.id]],
+        //     (copy_buffer(&vec![1.; K * J], device), false),
+        // );
         for (label, val) in &accs {
             if let Some(node) = gmem_to_node_mapping.get(label) {
                 match val {

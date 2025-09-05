@@ -35,23 +35,23 @@ pub fn codegen(
     StableGraph<Kernel, (usize, usize), Directed>,
     HashMap<NodeIndex, usize>,
 )> {
-    // display_graph(&graph);
+    // display_graph2(&graph, &[]);
     let gmems = graph
         .node_weights()
         .filter(|w| matches!(w, GraphTerm::GMEM { .. }))
         .count();
     let (kernels, output_kernels) = split_kernels(graph.clone(), outputs, n_graph);
     // Create kernel meta graph to toposort
-    let mut meta_graph = StableGraph::new();
+    let mut kernel_meta_graph = StableGraph::new();
     for _ in 0..kernels.len() {
-        meta_graph.add_node(Kernel::default());
+        kernel_meta_graph.add_node(Kernel::default());
     }
-    let global_input = meta_graph.add_node(Kernel {
+    let global_input = kernel_meta_graph.add_node(Kernel {
         code: "Inputs".to_string(),
         outputs: vec![Expression::from('-'); gmems],
         ..Default::default()
     });
-    let global_output = meta_graph.add_node(Kernel {
+    let global_output = kernel_meta_graph.add_node(Kernel {
         code: "Outputs".to_string(),
         ..Default::default()
     });
@@ -60,7 +60,7 @@ pub fn codegen(
     for (n_kernel, (_, inputs, _, _)) in kernels.iter().enumerate() {
         for (n_input, (input_kernel, _)) in inputs.into_iter().enumerate() {
             match input_kernel {
-                GMEMBuffer::PrevKernel { kernel, output } => meta_graph.add_edge(
+                GMEMBuffer::PrevKernel { kernel, output } => kernel_meta_graph.add_edge(
                     NodeIndex::new(*kernel),
                     NodeIndex::new(n_kernel),
                     (*output, n_input),
@@ -76,19 +76,28 @@ pub fn codegen(
                         panic!()
                     };
                     gmem_names.insert(*node, label.clone());
-                    meta_graph.add_edge(global_input, NodeIndex::new(n_kernel), (index, n_input))
+                    kernel_meta_graph.add_edge(
+                        global_input,
+                        NodeIndex::new(n_kernel),
+                        (index, n_input),
+                    )
                 }
             };
         }
     }
     for (i, (output_kernel, output_index)) in output_kernels.clone().into_iter().enumerate() {
-        meta_graph.add_edge(
+        kernel_meta_graph.add_edge(
             NodeIndex::new(output_kernel),
             global_output,
             (output_index, i),
         );
     }
-    for node in toposort(&meta_graph, None).unwrap() {
+    // display_graph2(&kernel_meta_graph, &[]);
+    let Ok(t) = toposort(&kernel_meta_graph, None) else {
+        // TODO: for some reason sometimes there are cycles in the kernel graph
+        return None;
+    };
+    for node in t {
         if kernels.len() <= node.index() {
             continue; // Either input node or output node
         }
@@ -106,7 +115,7 @@ pub fn codegen(
                 panic!("invalid kernel!")
             };
             // Would the input ordering be valid? lets assume it is for now
-            *meta_graph.node_weight_mut(node).unwrap() = custom_kernel.clone();
+            *kernel_meta_graph.node_weight_mut(node).unwrap() = custom_kernel.clone();
             continue;
         }
 
@@ -122,7 +131,7 @@ pub fn codegen(
             else {
                 panic!("invalid kernel!")
             };
-            meta_graph.node_weight_mut(node).unwrap().code = format!("Diff{diff}");
+            kernel_meta_graph.node_weight_mut(node).unwrap().code = format!("Diff{diff}");
             continue;
         }
 
@@ -305,7 +314,7 @@ kernel void kernel_name(
         if grid[2].exec(dyn_vars).unwrap() > MAX_GRID_YZ {
             return None;
         }
-        *meta_graph.node_weight_mut(node).unwrap() = Kernel {
+        *kernel_meta_graph.node_weight_mut(node).unwrap() = Kernel {
             code: kernel,
             grid: (grid[0], grid[1], grid[2]),
             threadblock: (threadblock[0], threadblock[1], threadblock[2]),
@@ -313,7 +322,7 @@ kernel void kernel_name(
             outputs: outputs.into_iter().map(|(o, _)| o.simplify()).collect(),
         };
     }
-    Some((meta_graph, gmem_mapping))
+    Some((kernel_meta_graph, gmem_mapping))
 }
 
 fn var_to_char(var: usize) -> String {
@@ -1597,11 +1606,11 @@ mod tests {
     }
 
     #[test]
-    fn test_stitch_meta_graph_empty() {
-        let meta_graph: StableGraph<SubGraph, (NodeIndex, NodeIndex), Directed> =
+    fn test_stitch_kernel_meta_graph_empty() {
+        let kernel_meta_graph: StableGraph<SubGraph, (NodeIndex, NodeIndex), Directed> =
             StableGraph::new();
         let outputs = vec![];
-        let (stitched, map, new_outputs) = stitch_meta_graph_together(meta_graph, outputs);
+        let (stitched, map, new_outputs) = stitch_meta_graph_together(kernel_meta_graph, outputs);
         assert_eq!(stitched.node_count(), 0);
         assert!(map.is_empty());
         assert!(new_outputs.is_empty());

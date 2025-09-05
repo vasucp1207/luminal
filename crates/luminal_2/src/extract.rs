@@ -5,7 +5,6 @@ use std::ptr::NonNull;
 use std::usize;
 
 use crate::Kernel;
-use crate::debug::display_graph;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
@@ -32,7 +31,7 @@ use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 1_000_000;
+const MAX_SEARCHED_GRAPHS: usize = 10_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -337,10 +336,11 @@ pub fn search(
     {
         // Build termdag
         let mut graph = extraction_to_graph(&egraph, &trajectory, &loop_level_map);
+        // crate::debug::display_graph2(&graph, &[]);
         prev_graphs.push(graph.clone());
         prev_traj.push(trajectory.clone());
 
-        // Dedup GMEMs
+        // Dedup GMEMs (don't think we need this?)
         let mut canon: FxHashMap<String, NodeIndex> = FxHashMap::default();
 
         for n in graph.node_indices().collect::<Vec<_>>() {
@@ -556,144 +556,277 @@ pub fn extraction_to_graph(
         Op(GraphTerm),
     }
 
-    fn recurse(
+    fn recurse<'b, 'a: 'b>(
         egraph: &EGraph,
-        trajectory: &[&NodeId],
+        trajectory: &[&'a NodeId],
         current: &mut usize,
         g: &mut StableGraph<GraphTerm, (), Directed>,
         loop_level_map: &FxHashMap<&NodeId, i32>,
+        prev_placed: &'b mut FxHashMap<&'a NodeId, NodeIndex>,
+        no_place: bool,
     ) -> Ret {
         let node_choice = trajectory[*current];
         let enode = &egraph.nodes[node_choice];
         match enode.op.as_str() {
             "GMEM" => {
                 *current += 1;
-                Ret::Expr(
-                    g.add_node(GraphTerm::GMEM {
-                        label: egraph.nodes[&enode.children[0]]
-                            .op
-                            .replace("Boxed(\"", "")
-                            .replace("\")", ""),
-                    }),
-                )
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    Ret::Expr(*prev_placed.entry(node_choice).or_insert_with(|| {
+                        g.add_node(GraphTerm::GMEM {
+                            label: egraph.nodes[&enode.children[0]]
+                                .op
+                                .replace("Boxed(\"", "")
+                                .replace("\")", ""),
+                        })
+                    }))
+                }
             }
-            "SMEM" => Ret::Expr(g.add_node(GraphTerm::SMEM)),
+            "SMEM" => {
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    Ret::Expr(
+                        *prev_placed
+                            .entry(node_choice)
+                            .or_insert_with(|| g.add_node(GraphTerm::SMEM)),
+                    )
+                }
+            }
 
             // LoopIn  = (LoopIn <expr> <Math> <Math>)
             "LoopIn" | "LoopOut" => {
                 *current += 1;
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Expr(child_one) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(range) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(range) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(stride) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!();
                 };
-                let r = g.add_node(match enode.op.as_str() {
-                    "LoopIn" => GraphTerm::LoopIn {
-                        range,
-                        stride,
-                        marker: loop_level_map
-                            .get(node_choice)
-                            .map(|i| i.to_string())
-                            .unwrap_or_default(),
-                    },
-                    "LoopOut" => GraphTerm::LoopOut {
-                        range,
-                        stride,
-                        marker: loop_level_map
-                            .get(node_choice)
-                            .map(|i| i.to_string())
-                            .unwrap_or_default(),
-                    },
-                    _ => panic!(),
-                });
-                g.add_edge(child_one, r, ());
-                Ret::Expr(r)
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    let r = *prev_placed.entry(node_choice).or_insert_with(|| {
+                        g.add_node(match enode.op.as_str() {
+                            "LoopIn" => GraphTerm::LoopIn {
+                                range,
+                                stride,
+                                marker: loop_level_map
+                                    .get(node_choice)
+                                    .map(|i| i.to_string())
+                                    .unwrap_or_default(),
+                            },
+                            "LoopOut" => GraphTerm::LoopOut {
+                                range,
+                                stride,
+                                marker: loop_level_map
+                                    .get(node_choice)
+                                    .map(|i| i.to_string())
+                                    .unwrap_or_default(),
+                            },
+                            _ => panic!(),
+                        })
+                    });
+                    g.add_edge(child_one, r, ());
+                    Ret::Expr(r)
+                }
             }
 
             "TCMatmul" => {
                 *current += 1;
-                let Ret::Expr(src_a) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Expr(src_a) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Expr(src_b) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Expr(src_b) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(a_k_stride) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(a_k_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(b_k_stride) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(b_k_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(a_inner_stride) =
-                    recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(a_inner_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(b_inner_stride) =
-                    recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(b_inner_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(c_inner_stride) =
-                    recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(c_inner_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(k_outer_loops) =
-                    recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Math(k_outer_loops) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
-                let r = g.add_node(GraphTerm::TCMatmul {
-                    a_k_stride,
-                    b_k_stride,
-                    a_inner_stride,
-                    b_inner_stride,
-                    c_inner_stride,
-                    k_outer_loops,
-                });
-                g.add_edge(src_a, r, ());
-                g.add_edge(src_b, r, ());
-                Ret::Expr(r)
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    let r = *prev_placed.entry(node_choice).or_insert_with(|| {
+                        g.add_node(GraphTerm::TCMatmul {
+                            a_k_stride,
+                            b_k_stride,
+                            a_inner_stride,
+                            b_inner_stride,
+                            c_inner_stride,
+                            k_outer_loops,
+                        })
+                    });
+                    g.add_edge(src_a, r, ());
+                    g.add_edge(src_b, r, ());
+                    Ret::Expr(r)
+                }
             }
             "Binary" => {
                 *current += 1;
-                let Ret::Op(op) = recurse(egraph, trajectory, current, g, loop_level_map) else {
+                let Ret::Op(op) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let first_enode = trajectory[*current];
+                let Ret::Expr(child_one) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Expr(child_two) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Expr(mut child_two) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    (first_enode == trajectory[*current]) | no_place, // TODO: this feels very hacky. There needs to be clear situations where we re-use placed ops, and others where we don't. Is it really just binary ops?
+                ) else {
                     panic!()
                 };
-                let r = g.add_node(op);
-                g.add_edge(child_one, r, ());
-                g.add_edge(child_two, r, ());
-                Ret::Expr(r)
+                if first_enode == trajectory[*current] {
+                    child_two = child_one;
+                }
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    let r = *prev_placed
+                        .entry(node_choice)
+                        .or_insert_with(|| g.add_node(op));
+                    g.add_edge(child_one, r, ());
+                    g.add_edge(child_two, r, ());
+                    Ret::Expr(r)
+                }
             }
             "Add" | "Mul" | "Max" => {
                 *current += 1;
@@ -706,16 +839,37 @@ pub fn extraction_to_graph(
             }
             "Unary" => {
                 *current += 1;
-                let Ret::Op(op) = recurse(egraph, trajectory, current, g, loop_level_map) else {
+                let Ret::Op(op) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let Ret::Expr(child_one) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
-                let r = g.add_node(op);
-                g.add_edge(child_one, r, ());
-                Ret::Expr(r)
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    let r = *prev_placed
+                        .entry(node_choice)
+                        .or_insert_with(|| g.add_node(op));
+                    g.add_edge(child_one, r, ());
+                    Ret::Expr(r)
+                }
             }
             "Exp2" | "Sin" | "Recip" | "Neg" | "Sqrt" => {
                 *current += 1;
@@ -731,11 +885,19 @@ pub fn extraction_to_graph(
             }
             "Fused" => {
                 *current += 1;
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g, loop_level_map)
-                else {
+                let np = prev_placed.get(trajectory[*current]).copied();
+                let Ret::Expr(child_one) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    np.is_some() | no_place,
+                ) else {
                     panic!()
                 };
-                Ret::Expr(child_one)
+                Ret::Expr(np.unwrap_or(child_one))
             }
             // ----------- literals & vars -----------
             op if op.starts_with("MNum:") => {
@@ -754,7 +916,15 @@ pub fn extraction_to_graph(
             // ----------- unary ops -----------
             "MNeg" | "MRecip" => {
                 *current += 1;
-                let Ret::Math(c0) = recurse(egraph, trajectory, current, g, loop_level_map) else {
+                let Ret::Math(c0) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 Ret::Math(match enode.op.as_str() {
@@ -768,11 +938,27 @@ pub fn extraction_to_graph(
             "MAdd" | "MSub" | "MMul" | "MDiv" | "MMod" | "MMin" | "MMax" | "MAnd" | "MOr"
             | "MGte" | "MLt" | "MFloorTo" => {
                 *current += 1;
-                let Ret::Math(lhs) = recurse(egraph, trajectory, current, g, loop_level_map) else {
+                let Ret::Math(lhs) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(rhs) = recurse(egraph, trajectory, current, g, loop_level_map) else {
+                let Ret::Math(rhs) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 Ret::Math(match enode.op.as_str() {
@@ -795,7 +981,15 @@ pub fn extraction_to_graph(
             }
             "MNum" | "MVar" => {
                 *current += 1;
-                recurse(egraph, trajectory, current, g, loop_level_map)
+                recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                )
             }
             _ => {
                 if let Ok(n) = enode.op.parse::<usize>() {
@@ -807,7 +1001,15 @@ pub fn extraction_to_graph(
         }
     }
 
-    recurse(egraph, trajectory, &mut 0, &mut g, loop_level_map);
+    recurse(
+        egraph,
+        trajectory,
+        &mut 0,
+        &mut g,
+        loop_level_map,
+        &mut FxHashMap::default(),
+        false,
+    );
     g
 }
 

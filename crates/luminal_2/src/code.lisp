@@ -265,6 +265,27 @@
 	(Fused (Binary ?bin ?a ?b))
 	:ruleset ir
 )
+(rewrite
+	(LoopIn (LoopOut (Unary ?un ?a) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st)
+	(Fused (Unary ?un ?a))
+	:ruleset ir
+)
+(rewrite
+	(LoopIn (LoopIn
+		(LoopOut (LoopOut (Unary ?un ?a) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2)
+	(Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Fused (Unary ?un ?a))
+	 :ruleset ir
+)
+(rewrite
+	(LoopIn (LoopIn (LoopIn
+		(LoopOut (LoopOut (LoopOut
+			(Unary ?un ?a)
+		(Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2) (Loop ?loopA3 ?range3) ?st3)
+	(Loop ?loopB3 ?range3) ?st3) (Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Fused (Unary ?un ?a))
+	:ruleset ir
+)
 
 ; Tiling
 (rewrite
@@ -279,7 +300,7 @@
 		(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
 	)
 	:when ((> ?range 8) (= (% ?range 8) 0))
-	:ruleset ir
+	;:ruleset ir
 )
 (rewrite
 	(TileLoop (LoopIn ?body (Loop ?loop (MNum ?range)) ?stride) ?loop)
@@ -596,14 +617,12 @@
 (run-schedule
 	(saturate expr)
 	(let-scheduler bo (back-off))
-	(repeat 1
+	(repeat 2
 		(run-with bo ir)
 		(saturate ir-prop)
 		(saturate expr)
 		;(saturate cleanup)
 	)
-	(saturate ir-prop)
-	(saturate tc)
 	(saturate ir-prop)
 	(saturate tc)
 	(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
