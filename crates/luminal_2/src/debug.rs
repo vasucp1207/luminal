@@ -1013,7 +1013,7 @@ impl TermToString for GraphTerm {
                 format!(
                     "TCMatmul ({a_k_stride}, {b_k_stride}, {a_inner_stride}, {b_inner_stride}, {c_inner_stride}, {k_outer_loops})"
                 ),
-                Color32::RED,
+                Color32::from_hex("#bf1919").unwrap(),
                 NodeShape::Circle,
             ),
             GraphTerm::LoopIn {

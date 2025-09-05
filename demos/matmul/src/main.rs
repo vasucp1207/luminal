@@ -12,6 +12,7 @@ use luminal_2::{
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
+    utils::render_egglog,
     GPUArch, GraphTerm,
 };
 #[cfg(feature = "metal")]
@@ -40,7 +41,7 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N, J) = (64, 512, 512, 64);
+        let (M, K, N, J) = (64, 64, 512, 512);
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
@@ -48,12 +49,12 @@ fn main() {
         let out = a.matmul(b).matmul(c);
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
+        // display_multiple_graphs(&new_graph.node_weights().collect_vec());
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
-            luminal_2::debug::display_graph(&graph);
+            // luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
-
             let searched_graph = search(graph, 3, &inputs, arch.clone(), &cx.dyn_map).unwrap();
             // adjust meta-edges
             let old_output = graph.externals(Direction::Outgoing).next().unwrap();

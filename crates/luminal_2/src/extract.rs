@@ -5,6 +5,7 @@ use std::ptr::NonNull;
 use std::usize;
 
 use crate::Kernel;
+use crate::debug::display_graph;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
@@ -31,7 +32,7 @@ use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 100_000;
+const MAX_SEARCHED_GRAPHS: usize = 1_000_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
