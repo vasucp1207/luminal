@@ -26,8 +26,7 @@ pub const MAX_GRID_X: usize = 2147483647;
 pub const MAX_GRID_YZ: usize = 65535;
 
 pub fn codegen(
-    graph: StableGraph<GraphTerm, (), Directed>,
-    outputs: Vec<NodeIndex>,
+    mut graph: StableGraph<GraphTerm, (), Directed>,
     mut arch: GPUArch,
     n_graph: usize,
     dyn_vars: &FxHashMap<char, usize>,
@@ -35,12 +34,19 @@ pub fn codegen(
     StableGraph<Kernel, (usize, usize), Directed>,
     HashMap<NodeIndex, usize>,
 )> {
-    // display_graph2(&graph, &[]);
     let gmems = graph
         .node_weights()
         .filter(|w| matches!(w, GraphTerm::GMEM { .. }))
         .count();
-    let (kernels, output_kernels) = split_kernels(graph.clone(), outputs, n_graph);
+    // Remove free-standing GMEMs
+    for node in graph.node_indices().collect_vec() {
+        if matches!(graph.node_weight(node).unwrap(), GraphTerm::GMEM { .. })
+            && graph.neighbors_undirected(node).next().is_none()
+        {
+            graph.remove_node(node);
+        }
+    }
+    let (kernels, output_kernels) = split_kernels(graph.clone(), n_graph);
     // if kernels.len() == 1 {
     //     panic!();
     // }
@@ -1010,7 +1016,6 @@ fn toposort_subset<N, E>(
 /// add kernel dimensions so that all loop-to-loop dependencies are between seperate kernels or on the threadblock / thread levels
 fn split_kernels(
     graph: StableGraph<GraphTerm, (), Directed>,
-    outputs: Vec<NodeIndex>,
     _n_graph: usize,
 ) -> (
     Vec<(
@@ -1021,15 +1026,19 @@ fn split_kernels(
     )>,
     Vec<(usize, usize)>, // Output kernels
 ) {
+    // display_graph2(&graph, &[]);
     // Mark level of ops in graph
     let mut marked_graph = StableGraph::new();
     let mut map = HashMap::<NodeIndex, NodeIndex>::default();
     // Add nodes
-    let chosen_root = outputs[0];
     let mut to_remove = vec![];
     for node in graph.node_indices().sorted() {
         let mut levels = FxHashSet::default();
-        if node == chosen_root {
+        if graph
+            .neighbors_directed(node, Direction::Outgoing)
+            .next()
+            .is_none()
+        {
             levels.insert(0);
         }
         // Ensure node indexes match between original and marked graph by making dummy indexes if needed
@@ -1042,7 +1051,6 @@ fn split_kernels(
     for n in to_remove {
         marked_graph.remove_node(n);
     }
-    let outputs = outputs.into_iter().map(|n| map[&n]).collect_vec();
     // Add edges
     for edge in graph.edge_indices() {
         let (start, end) = graph.edge_endpoints(edge).unwrap();
@@ -1050,7 +1058,7 @@ fn split_kernels(
     }
 
     // Assign loop levels
-    let mut seen = outputs.iter().copied().collect::<HashSet<_>>();
+    let mut seen = graph.externals(Direction::Outgoing).collect::<HashSet<_>>();
     let mut dfs = seen
         .iter()
         .flat_map(|n| marked_graph.neighbors_directed(*n, Direction::Incoming))
@@ -1119,10 +1127,10 @@ fn split_kernels(
                 if min_src <= max_curr {
                     let max_kernel = curr_kernel
                         .iter()
-                        .max()
                         .map(|i| *i + 1)
-                        .unwrap()
-                        .max(*src_kernel.iter().max().unwrap_or(&0));
+                        .chain(src_kernel.iter().copied())
+                        .max()
+                        .unwrap_or(0);
                     n_kernels = n_kernels.max(max_kernel + 2);
                     src_kernel.clear();
                     src_kernel.insert(max_kernel + 1);
@@ -1140,7 +1148,8 @@ fn split_kernels(
     // Prune out unnessecary kernel members
     let mut seen = FxHashSet::default();
     let mut dfs_stack = marked_graph
-        .neighbors_directed(chosen_root, Direction::Incoming)
+        .externals(Direction::Outgoing)
+        .flat_map(|n| marked_graph.neighbors_directed(n, Direction::Incoming))
         .collect_vec();
     while let Some(node) = dfs_stack.pop() {
         let (term, curr_level, mut curr_kernel) = marked_graph.node_weight(node).unwrap().clone();
@@ -1306,7 +1315,10 @@ fn split_kernels(
                 node,
                 kernel_graph.add_node((term.clone(), loop_level.len())),
             );
-            if let Some(ind) = outputs.iter().position(|n| *n == node) {
+            if let Some(ind) = marked_graph
+                .externals(Direction::Outgoing)
+                .position(|n| n == node)
+            {
                 final_outputs.insert(ind, (*kernel, curr_outputs.len()));
                 curr_outputs.push((Expression::default(), node_maps[*kernel][&node]));
             }
@@ -1365,7 +1377,6 @@ fn split_kernels(
 
     // Go through SMEM buffers
     for (kernel_graph, inputs, outputs, smem_buffers) in &mut kernel_graphs {
-        let orig_kernel_graph = kernel_graph.clone();
         for node in kernel_graph.node_indices() {
             if let (GraphTerm::SMEM, _) = kernel_graph[node] {
                 // Walk forward until load to find the size
@@ -1441,14 +1452,18 @@ fn split_kernels(
                     .next()
                     .is_none()
                 {
-                    display_graph(&orig_kernel_graph);
+                    display_graph2(&kernel_graph, &[]);
                     display_graph2(&marked_graph, &[]);
-                    display_graph(&kernel_graph);
+                    display_graph2(&graph, &[]);
                 }
-                curr = kernel_graph
+                if let Some(c) = kernel_graph
                     .neighbors_directed(curr, Direction::Incoming)
                     .next()
-                    .unwrap();
+                {
+                    curr = c;
+                } else {
+                    break;
+                }
             }
             *size = new_size.simplify();
         }

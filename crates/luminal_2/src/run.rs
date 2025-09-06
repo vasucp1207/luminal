@@ -122,7 +122,6 @@ pub fn chunk_based_search_compiler(
         // luminal_2::utils::display_graph(&new_graph, &[]);
         let (kernels, gmem_mapping) = codegen(
             new_graph.clone(),
-            outputs,
             GPUArch::Metal(HashMap::default()),
             0,
             &original_graph.dyn_map,

@@ -40,16 +40,14 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N, J) = (100000, 512, 512, 512);
+        let (M, K, N, J) = (512, 512, 512, 512);
         let mut cx = Graph::new();
-        let a = cx.named_tensor("A", (M));
-        // let b = cx.named_tensor("B", (K, N));
+        let a = cx.named_tensor("A", (M, K));
+        let b = cx.named_tensor("B", (K, N));
         // let c = cx.named_tensor("C", (N, J));
-        let out = a.swish();
-        let out = out * out;
+        let out = a.matmul(b).swish();
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
-        // luminal_2::debug::display_multiple_graphs(&new_graph.node_weights().collect_vec());
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
@@ -121,8 +119,7 @@ fn main() {
                 unified_map.insert(k, *m);
             }
         }
-        let (kernels, gmem_mapping) =
-            codegen(graph.clone(), outputs, arch, 0, &HashMap::default()).unwrap();
+        let (kernels, gmem_mapping) = codegen(graph.clone(), arch, 0, &HashMap::default()).unwrap();
 
         let compiled = compile_kernels(&kernels);
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
@@ -137,26 +134,28 @@ fn main() {
             gmem_mapping[&unified_map[&a.id]],
             (copy_buffer(&vec![1.; M * K], device), false),
         );
-        // inputs.insert(
-        //     gmem_mapping[&unified_map[&b.id]],
-        //     (copy_buffer(&vec![1.; K * N], device), false),
-        // );
+        inputs.insert(
+            gmem_mapping[&unified_map[&b.id]],
+            (copy_buffer(&vec![1.; K * N], device), false),
+        );
         // inputs.insert(
         //     gmem_mapping[&unified_map[&c.id]],
         //     (copy_buffer(&vec![1.; K * J], device), false),
         // );
         for (label, val) in &accs {
             if let Some(node) = gmem_to_node_mapping.get(label) {
-                match val {
-                    InitData::Expr(e) => {
-                        let val = e.exec(&cx.dyn_map).unwrap();
-                        inputs.insert(gmem_mapping[node], {
-                            let v = vec![val as f32];
-                            (copy_buffer(&v, device), true)
-                        });
-                    }
-                    InitData::Data(d) => {
-                        inputs.insert(gmem_mapping[node], (copy_buffer(d, device), true));
+                if let Some(input_index) = gmem_mapping.get(node) {
+                    match val {
+                        InitData::Expr(e) => {
+                            let val = e.exec(&cx.dyn_map).unwrap();
+                            inputs.insert(*input_index, {
+                                let v = vec![val as f32];
+                                (copy_buffer(&v, device), true)
+                            });
+                        }
+                        InitData::Data(d) => {
+                            inputs.insert(*input_index, (copy_buffer(d, device), true));
+                        }
                     }
                 }
             }

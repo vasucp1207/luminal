@@ -438,8 +438,8 @@
 			 (LoopOut ; k
 				(Binary (Add)
 					(Fused (Binary (Mul)
-						(TiledMatmulInputA ?a ?k ?k_loops)
 						(TiledMatmulInputB ?b ?n ?k_loops)
+						(TiledMatmulInputA ?a ?k ?k_loops)
 					))
 					; accumulator
 					(LoopIn ; k
@@ -619,13 +619,13 @@
 	(let-scheduler bo (back-off))
 	(repeat 1
 		(run-with bo ir)
-		;(saturate ir-prop)
-		;(saturate expr)
-		;(saturate cleanup)
+		(saturate ir-prop)
+		(saturate expr)
+		(saturate cleanup)
 	)
-	;(saturate ir-prop)
-	;(saturate tc)
-	;(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
+	(saturate ir-prop)
+	(saturate tc)
+	(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
 )
 
 ;(print-size)

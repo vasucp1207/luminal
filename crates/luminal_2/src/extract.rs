@@ -5,6 +5,7 @@ use std::ptr::NonNull;
 use std::usize;
 
 use crate::Kernel;
+use crate::debug::display_graph;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
@@ -30,7 +31,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
-const TRIALS: usize = 1;
+const TRIALS: usize = 2;
 const MAX_SEARCHED_GRAPHS: usize = 100_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
@@ -376,9 +377,8 @@ pub fn search(
             .filter_map(|(label, data)| canon.get(label).map(|&n| (n, data.clone())))
             .collect();
 
-        let root = graph.externals(Direction::Outgoing).next().unwrap();
         let Some((kernels, gmem_mapping)) =
-            crate::codegen::codegen(graph.clone(), vec![root], arch.clone(), 0, dyn_vars)
+            crate::codegen::codegen(graph.clone(), arch.clone(), 0, dyn_vars)
         else {
             continue;
         };
@@ -451,9 +451,6 @@ pub fn search(
                     if og_kernels.is_empty() {
                         og_kernels = kernel_string.clone();
                     }
-                    // if kernel_string.len() < fastest.len() || fastest.is_empty() {
-
-                    // }
                     if us < best_time {
                         best_time = us;
                         best_graph = Some(graph);
@@ -571,14 +568,18 @@ pub fn extraction_to_graph(
         match enode.op.as_str() {
             "GMEM" => {
                 *current += 1;
-                Ret::Expr(*prev_placed.entry(node_choice).or_insert_with(|| {
-                    g.add_node(GraphTerm::GMEM {
-                        label: egraph.nodes[&enode.children[0]]
-                            .op
-                            .replace("Boxed(\"", "")
-                            .replace("\")", ""),
-                    })
-                }))
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    Ret::Expr(*prev_placed.entry(node_choice).or_insert_with(|| {
+                        g.add_node(GraphTerm::GMEM {
+                            label: egraph.nodes[&enode.children[0]]
+                                .op
+                                .replace("Boxed(\"", "")
+                                .replace("\")", ""),
+                        })
+                    }))
+                }
             }
             "SMEM" => todo!(),
 
@@ -782,7 +783,6 @@ pub fn extraction_to_graph(
                 ) else {
                     panic!()
                 };
-                let ch1 = trajectory[*current];
                 let Ret::Expr(child_one) = recurse(
                     egraph,
                     trajectory,
@@ -795,7 +795,6 @@ pub fn extraction_to_graph(
                     panic!()
                 };
                 *current += 1;
-                let ch2 = trajectory[*current];
                 let Ret::Expr(child_two) = recurse(
                     egraph,
                     trajectory,
@@ -812,10 +811,6 @@ pub fn extraction_to_graph(
                 } else if let Some(n) = prev_placed.get(node_choice) {
                     Ret::Expr(*n)
                 } else {
-                    // if ch1.to_string().contains("Fused") && ch2.to_string().contains("Fused") {
-                    //     panic!();
-                    // }
-                    // println!("{op:?}: {ch1:?} : {ch2:?}");
                     let r = g.add_node(op);
                     prev_placed.insert(node_choice, r);
                     g.add_edge(child_one, r, ());
@@ -1003,6 +998,11 @@ pub fn extraction_to_graph(
         &mut FxHashMap::default(),
         false,
     );
+    for n in g.node_indices() {
+        if g.neighbors_undirected(n).next().is_none() {
+            display_graph(&g);
+        }
+    }
     g
 }
 
@@ -1024,6 +1024,7 @@ fn cost<'a>(
         // Copy input buffers over
         let mut inputs = inputs
             .into_iter()
+            .filter(|(n, _)| gmem_mapping.contains_key(n))
             .map(|(n, b)| {
                 (
                     gmem_mapping[n],
