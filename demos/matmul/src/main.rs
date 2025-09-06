@@ -12,6 +12,7 @@ use luminal_2::{
     extract::{make_test_inputs, search},
     run::{assign_buffers, compile_kernels, run_graph},
     translate::{translate_graph, InitData},
+    utils::render_egglog,
     GPUArch, GraphTerm,
 };
 #[cfg(feature = "metal")]
@@ -40,12 +41,13 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N, J) = (100000, 512, 512, 512);
+        let (M, K, N, J) = (1000000, 512, 512, 512);
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M));
         // let b = cx.named_tensor("B", (K, N));
         // let c = cx.named_tensor("C", (N, J));
         let out = a.swish();
+        let out = out * out;
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // luminal_2::debug::display_multiple_graphs(&new_graph.node_weights().collect_vec());

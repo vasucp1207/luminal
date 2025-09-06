@@ -14,7 +14,7 @@ use std::{
 
 use crate::{
     GMEMBuffer, GPUArch, GraphTerm, Kernel,
-    debug::display_graph,
+    debug::{display_graph, display_graph2},
     translate::{MetaGraph, SubGraph},
     utils::validate_graph,
 };
@@ -41,6 +41,7 @@ pub fn codegen(
         .filter(|w| matches!(w, GraphTerm::GMEM { .. }))
         .count();
     let (kernels, output_kernels) = split_kernels(graph.clone(), outputs, n_graph);
+
     // Create kernel meta graph to toposort
     let mut kernel_meta_graph = StableGraph::new();
     for _ in 0..kernels.len() {
@@ -1069,7 +1070,8 @@ fn split_kernels(
             }
             if matches!(curr_term, GraphTerm::LoopIn { .. }) {
                 if neighbor_levels.is_empty() {
-                    display_graph(&marked_graph);
+                    // display_graph2(&graph, &[]);
+                    display_graph2(&marked_graph, &[]);
                 }
                 neighbor_levels.pop().unwrap();
             }
@@ -1361,6 +1363,7 @@ fn split_kernels(
 
     // Go through SMEM buffers
     for (kernel_graph, inputs, outputs, smem_buffers) in &mut kernel_graphs {
+        let orig_kernel_graph = kernel_graph.clone();
         for node in kernel_graph.node_indices() {
             if let (GraphTerm::SMEM, _) = kernel_graph[node] {
                 // Walk forward until load to find the size
@@ -1399,7 +1402,7 @@ fn split_kernels(
             if !matches!(kernel_graph[*input].0, GraphTerm::GMEM { .. }) {
                 let new_input = kernel_graph.add_node((
                     GraphTerm::GMEM {
-                        label: "Output".to_string(),
+                        label: "Kernel Input".to_string(),
                     },
                     0,
                 ));
@@ -1411,7 +1414,7 @@ fn split_kernels(
             if !matches!(kernel_graph[*output].0, GraphTerm::GMEM { .. }) {
                 let new_output = kernel_graph.add_node((
                     GraphTerm::GMEM {
-                        label: "Output".to_string(),
+                        label: "Kernel Output".to_string(),
                     },
                     0,
                 ));
@@ -1430,6 +1433,15 @@ fn split_kernels(
                     }
                 } else if !matches!(term, GraphTerm::GMEM { .. }) {
                     break;
+                }
+                if kernel_graph
+                    .neighbors_directed(curr, Direction::Incoming)
+                    .next()
+                    .is_none()
+                {
+                    display_graph(&orig_kernel_graph);
+                    display_graph2(&marked_graph, &[]);
+                    display_graph(&kernel_graph);
                 }
                 curr = kernel_graph
                     .neighbors_directed(curr, Direction::Incoming)

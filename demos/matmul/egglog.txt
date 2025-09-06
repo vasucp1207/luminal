@@ -250,6 +250,11 @@
 	:ruleset ir
 )
 (rewrite
+	(Binary ?bin (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st))
+	(Binary ?bin (Fused ?a) (Fused ?a))
+	:ruleset ir
+)
+(rewrite
 	(LoopIn (LoopIn
 		(LoopOut (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2)
 	(Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
@@ -640,6 +645,10 @@
 (let t28 (LoopIn t4 (Loop "0" (MNum 100000)) (MVar "z")))
 (let t29 (Binary (Mul) t27 t28))
 (let t30 (LoopOut t29 (Loop "0" (MNum 100000)) (MVar "z")))
+(let t31 (LoopIn t30 (Loop "0" (MNum 100000)) (MVar "z")))
+(let t32 (LoopIn t30 (Loop "0" (MNum 100000)) (MVar "z")))
+(let t33 (Binary (Mul) t31 t32))
+(let t34 (LoopOut t33 (Loop "0" (MNum 100000)) (MVar "z")))
 
 
 (ruleset loop-unname)
@@ -648,15 +657,35 @@
 (run-schedule
 	(saturate expr)
 	(let-scheduler bo (back-off))
-	(repeat 2
+	(repeat 1
 		(run-with bo ir)
-		(saturate ir-prop)
-		(saturate expr)
+		;(saturate ir-prop)
+		;(saturate expr)
 		;(saturate cleanup)
 	)
-	(saturate ir-prop)
-	(saturate tc)
-	(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
+	;(saturate ir-prop)
+	;(saturate tc)
+	;(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
 )
+
+(let a0 (GMEM "Constant(1.0)"))
+(let a1 (LoopIn a0 (Loop "0" (MNum 100000)) (MNum 0)))
+(let a2 (GMEM "A Load"))
+(let a3 (LoopIn a2 (Loop "0" (MNum 100000)) (MVar "z")))
+(let a4 (GMEM "Constant(-1.0)"))
+(let a5 (LoopIn a4 (Loop "0" (MNum 100000)) (MNum 0)))
+(let a6 (Binary (Mul) a3 a5))
+(let a7 (GMEM "Constant(1.442695)"))
+(let a8 (LoopIn a7 (Loop "0" (MNum 100000)) (MNum 0)))
+(let a9 (Binary (Mul) (Fused a6) a8))
+(let a10 (Unary (Exp2) (Fused a9)))
+(let a11 (Binary (Add) a1 (Fused a10)))
+(let a12 (Unary (Recip) (Fused a11)))
+(let a13 (Binary (Mul) a1 (Fused a12)))
+(let a14 (Binary (Mul) (Fused a13) a3))
+(let a17 (Binary (Mul) (Fused a14) (Fused a14)))
+(let a18 (LoopOut a17 (Loop "0" (MNum 100000)) (MVar "z")))
+
+(check (= a18 t34))
 
 ;(print-size)

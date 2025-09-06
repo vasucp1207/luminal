@@ -250,6 +250,11 @@
 	:ruleset ir
 )
 (rewrite
+	(Binary ?bin (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st))
+	(Binary ?bin (Fused ?a) (Fused ?a))
+	:ruleset ir
+)
+(rewrite
 	(LoopIn (LoopIn
 		(LoopOut (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2)
 	(Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
@@ -617,15 +622,15 @@
 (run-schedule
 	(saturate expr)
 	(let-scheduler bo (back-off))
-	(repeat 2
+	(repeat 1
 		(run-with bo ir)
-		(saturate ir-prop)
-		(saturate expr)
+		;(saturate ir-prop)
+		;(saturate expr)
 		;(saturate cleanup)
 	)
-	(saturate ir-prop)
-	(saturate tc)
-	(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
+	;(saturate ir-prop)
+	;(saturate tc)
+	;(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
 )
 
 ;(print-size)
