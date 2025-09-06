@@ -112,7 +112,7 @@
 ; -------------- HELPERS ---------------
 
 ; Communative binary ops
-(rewrite (Binary ?bin ?a ?b) (Binary ?bin ?b ?a) :ruleset ir)
+;(rewrite (Binary ?bin ?a ?b) (Binary ?bin ?b ?a) :ruleset ir)
 ; distributive/associative skeletons so sums and products re-associate
 ;(rewrite (Add (Add ?a ?b) ?c) (Add ?a (Add ?b ?c)) :ruleset ir)
 ;(rewrite (Mul (Mul ?a ?b) ?c) (Mul ?a (Mul ?b ?c)) :ruleset ir)
@@ -247,11 +247,6 @@
 (rewrite
 	(LoopIn (LoopOut (Binary ?bin ?a ?b) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st)
 	(Fused (Binary ?bin ?a ?b))
-	:ruleset ir
-)
-(rewrite
-	(Binary ?bin (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st) (LoopIn (LoopOut ?a (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st))
-	(Binary ?bin (Fused ?a) (Fused ?a))
 	:ruleset ir
 )
 (rewrite

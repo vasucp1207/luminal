@@ -41,7 +41,9 @@ pub fn codegen(
         .filter(|w| matches!(w, GraphTerm::GMEM { .. }))
         .count();
     let (kernels, output_kernels) = split_kernels(graph.clone(), outputs, n_graph);
-
+    // if kernels.len() == 1 {
+    //     panic!();
+    // }
     // Create kernel meta graph to toposort
     let mut kernel_meta_graph = StableGraph::new();
     for _ in 0..kernels.len() {

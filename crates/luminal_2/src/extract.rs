@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 10_000;
+const MAX_SEARCHED_GRAPHS: usize = 100_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -173,7 +173,7 @@ fn extract_trajectories<'a>(
     current_class: &'a ClassId,
     seen: &mut FxHashMap<&'a NodeId, usize>,
     junk_cache: &mut FxHashSet<&'a NodeId>,
-    trajectory_cache: &mut FxHashMap<&'a ClassId, Vec<Vec<&'a NodeId>>>,
+    trajectory_cache: &mut FxHashMap<&'a NodeId, Vec<Vec<&'a NodeId>>>,
     waiting: usize,
 ) -> Vec<Vec<&'a NodeId>> {
     let mut trajectories = vec![];
@@ -190,14 +190,20 @@ fn extract_trajectories<'a>(
         *seen.entry(enode).or_insert(0) += 1;
         for child in &egraph.nodes[enode].children {
             let child_first_enode = child;
-            let child = egraph.nid_to_cid(child);
+            // let child = egraph.nid_to_cid(child);
             // Ask what's the child's trajectories
             if !trajectory_cache.contains_key(child) {
                 let child_trajectories = if is_expression_enode(&egraph.nodes[child_first_enode].op)
                 {
-                    extract_shortest(egraph, child, seen, junk_cache, &mut FxHashMap::default())
-                        .map(|i| vec![i])
-                        .unwrap_or_default()
+                    extract_shortest(
+                        egraph,
+                        egraph.nid_to_cid(child),
+                        seen,
+                        junk_cache,
+                        &mut FxHashMap::default(),
+                    )
+                    .map(|i| vec![i])
+                    .unwrap_or_default()
                 } else if egraph.nodes[child_first_enode].op == "Loop" {
                     // Pull just the range out for the loop
                     extract_shortest(
@@ -212,7 +218,7 @@ fn extract_trajectories<'a>(
                 } else {
                     extract_trajectories(
                         egraph,
-                        child,
+                        egraph.nid_to_cid(child),
                         seen,
                         junk_cache,
                         trajectory_cache,
