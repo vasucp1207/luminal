@@ -2,19 +2,25 @@ use itertools::Itertools;
 use luminal::{
     prelude::{
         NodeIndex,
-        petgraph::{Directed, Direction, algo::toposort, prelude::StableGraph, visit::EdgeRef},
+        petgraph::{
+            Directed, Direction,
+            algo::toposort,
+            prelude::StableGraph,
+            unionfind::UnionFind,
+            visit::{EdgeRef, NodeIndexable},
+        },
     },
     shape::{Expression, Term},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     iter::repeat,
 };
 
 use crate::{
     GMEMBuffer, GPUArch, GraphTerm, Kernel,
-    debug::{display_graph, display_graph2},
+    debug::{display_graph, display_graph2, display_multiple_graphs},
     translate::{MetaGraph, SubGraph},
     utils::validate_graph,
 };
@@ -941,19 +947,21 @@ fn make_kernel(
                     format!(
                         "
 // TensorCore loop
-simdgroup_float8x8 acc = simdgroup_float8x8(0);
-for (uint tc_loop = 0; tc_loop < {}; tc_loop++) {{
-    threadgroup_barrier(mem_flags::mem_threadgroup); // For some reason this speeds it up
+{{
+	simdgroup_float8x8 acc = simdgroup_float8x8(0);
+	for (uint tc_loop = 0; tc_loop < {}; tc_loop++) {{
+	    threadgroup_barrier(mem_flags::mem_threadgroup); // For some reason this speeds it up
 
-    // Load sources into simdgroup matricies
-    simdgroup_float8x8 simdA;
-    simdgroup_load(simdA, {} + {}, {});
-    simdgroup_float8x8 simdB;
-    simdgroup_load(simdB, {} + {}, {});
+	    // Load sources into simdgroup matricies
+	    simdgroup_float8x8 simdA;
+	    simdgroup_load(simdA, {} + {}, {});
+	    simdgroup_float8x8 simdB;
+	    simdgroup_load(simdB, {} + {}, {});
 
-    simdgroup_multiply_accumulate(acc, simdA, simdB, acc);
-}}
-simdgroup_store(acc, {}, {});",
+	    simdgroup_multiply_accumulate(acc, simdA, simdB, acc);
+	}}
+	simdgroup_store(acc, {}, {});
+}}",
                         k_outer_loops.to_kernel(),
                         var_to_char(src_a),
                         a_k_stride.to_kernel().replace("const_z", "tc_loop"),
@@ -1144,109 +1152,30 @@ fn split_kernels(
             }
         }
     }
+    let orig = marked_graph.clone();
 
-    // Prune out unnessecary kernel members
-    let mut seen = FxHashSet::default();
-    let mut dfs_stack = marked_graph
-        .externals(Direction::Outgoing)
-        .flat_map(|n| marked_graph.neighbors_directed(n, Direction::Incoming))
-        .collect_vec();
-    while let Some(node) = dfs_stack.pop() {
-        let (term, curr_level, mut curr_kernel) = marked_graph.node_weight(node).unwrap().clone();
-        let split_cond = curr_level.len() < GRID_DIMS + THREADBLOCK_DIMS
-            && matches!(term, GraphTerm::LoopOut { .. });
-        curr_kernel.retain(|k| {
-            matches!(term, GraphTerm::Custom(_) | GraphTerm::Diff(_))
-                || marked_graph
-                    .neighbors_directed(node, Direction::Outgoing)
-                    .any(|n| {
-                        ((split_cond || matches!(marked_graph[n].0, GraphTerm::Diff(_)))
-                            && matches!(
-                                marked_graph[n].0,
-                                GraphTerm::LoopIn { .. }
-                                    | GraphTerm::Diff(_)
-                                    | GraphTerm::Custom(_)
-                            ))
-                            || marked_graph[n].2.contains(k)
-                    })
-        });
-        if marked_graph.node_weight_mut(node).unwrap().2.len() != curr_kernel.len()
-            || !seen.contains(&node)
-        {
-            dfs_stack.extend(marked_graph.neighbors_directed(node, Direction::Incoming));
-            seen.insert(node);
-        }
-        marked_graph.node_weight_mut(node).unwrap().2 = curr_kernel;
-    }
+    // Split disjoint kernels into unique kernels
+    reassign_disjoint_kernels(&mut marked_graph);
+    // display_multiple_graphs(&[&orig, &marked_graph]);
 
-    // Disallow disjoint nodes to be in the same kernel
-    let mut by_kernel: HashMap<usize, Vec<NodeIndex>> = HashMap::new();
-    for n in marked_graph.node_indices() {
-        for &k in &marked_graph[n].2 {
-            // field 2 == Vec<usize> of kernel IDs
-            by_kernel.entry(k).or_default().push(n);
-        }
-    }
-    use std::collections::{HashSet, VecDeque};
-    let mut next_kernel = n_kernels; // keep issuing fresh IDs
-
-    for (k, nodes) in by_kernel {
-        let mut seen: HashSet<NodeIndex> = HashSet::new();
-
-        for &seed in &nodes {
-            if seen.contains(&seed) {
-                continue;
-            }
-
-            // BFS restricted to nodes that still carry -k-
-            let mut q = VecDeque::from([seed]);
-            let mut comp: Vec<NodeIndex> = Vec::new();
-            while let Some(v) = q.pop_front() {
-                if !seen.insert(v) {
-                    continue;
-                }
-                comp.push(v);
-                for nb in marked_graph.neighbors_undirected(v) {
-                    if marked_graph[nb].2.contains(&k) {
-                        q.push_back(nb);
-                    }
-                }
-            }
-
-            // first component keeps k; extra components get fresh IDs
-            if !comp.is_empty() && seed != nodes[0] {
-                let new_k = {
-                    next_kernel += 1;
-                    next_kernel - 1
-                };
-                for v in comp {
-                    let kernels = &mut marked_graph.node_weight_mut(v).unwrap().2;
-                    kernels.retain(|id| *id != k);
-                    kernels.insert(new_k);
-                }
-            }
-        }
-    }
-    n_kernels = next_kernel;
-    // Remove / decrement kernels that have no nodes (pruning could have removed all presence of a kernel)
+    n_kernels = *marked_graph
+        .node_weights()
+        .flat_map(|(_, _, k)| k.iter())
+        .max()
+        .expect("No kernels found!?")
+        + 1;
+    // Remove holes in the kernel index count (0, 1, 3, 4) -> (0, 1, 2, 3)
     for kernel in (0..n_kernels).rev() {
-        let mut seen = false;
-        for (_, _, kernels) in marked_graph.node_weights() {
-            if kernels.contains(&kernel) {
-                seen = true;
-                break;
-            }
-        }
-        if !seen {
+        if marked_graph
+            .node_weights()
+            .all(|(_, _, k)| !k.contains(&kernel))
+        {
             for (_, _, kernels) in marked_graph.node_weights_mut() {
-                for k in kernels.clone().iter() {
-                    if *k > kernel {
-                        kernels.remove(k);
-                        kernels.insert(*k - 1);
-                    }
-                }
+                *kernels = kernels
+                    .drain()
+                    .map(|k| if k > kernel { k - 1 } else { k })
+                    .collect();
             }
-            n_kernels -= 1;
         }
     }
     // Add kernel barriers
@@ -1302,6 +1231,12 @@ fn split_kernels(
     }
 
     // Place nodes in kernel graphs
+    n_kernels = *marked_graph
+        .node_weights()
+        .flat_map(|(_, _, k)| k.iter())
+        .max()
+        .expect("No kernels found!?")
+        + 1;
     let mut kernel_graphs = (0..n_kernels)
         .map(|_| (StableGraph::new(), vec![], vec![], vec![]))
         .collect_vec();
@@ -1477,6 +1412,75 @@ fn split_kernels(
             .map(|(_, v)| v)
             .collect(),
     )
+}
+
+fn reassign_disjoint_kernels(
+    g: &mut StableGraph<(GraphTerm, Vec<Expression>, FxHashSet<usize>), (), Directed, u32>,
+) -> usize {
+    // Build i -> nodes and find current max index
+    let mut next_idx = 0usize;
+    let mut idx_to_nodes: FxHashMap<usize, Vec<NodeIndex<u32>>> = FxHashMap::default();
+    for n in g.node_indices() {
+        let ws = &g[n].2;
+        for &i in ws {
+            idx_to_nodes.entry(i).or_default().push(n);
+            if i > next_idx {
+                next_idx = i;
+            }
+        }
+    }
+
+    // For each i, find connected components in the subgraph induced by nodes containing i
+    for (i, nodes) in idx_to_nodes {
+        if nodes.len() <= 1 {
+            continue;
+        }
+
+        let with_i: FxHashSet<_> = nodes.iter().copied().collect();
+        let mut visited: FxHashSet<NodeIndex<u32>> = FxHashSet::default();
+        let mut comps: Vec<Vec<NodeIndex<u32>>> = Vec::new();
+
+        for &start in &nodes {
+            if visited.contains(&start) {
+                continue;
+            }
+            let mut q = VecDeque::new();
+            let mut comp = Vec::new();
+            visited.insert(start);
+            q.push_back(start);
+
+            while let Some(n) = q.pop_front() {
+                comp.push(n);
+                // weak connectivity inside the induced subgraph
+                for m in g.neighbors_undirected(n) {
+                    if with_i.contains(&m) && !visited.contains(&m) {
+                        visited.insert(m);
+                        q.push_back(m);
+                    }
+                }
+            }
+            comps.push(comp);
+        }
+
+        if comps.len() <= 1 {
+            continue;
+        }
+
+        // Keep the largest component's i; rename i in the others
+        comps.sort_by_key(|c| std::cmp::Reverse(c.len()));
+        for comp in comps.into_iter().skip(1) {
+            next_idx += 1;
+            let new_i = next_idx;
+            for n in comp {
+                let ws = &mut g.node_weight_mut(n).unwrap().2;
+                if ws.remove(&i) {
+                    ws.insert(new_i);
+                }
+            }
+        }
+    }
+
+    next_idx
 }
 
 pub fn stitch_meta_graph_together(

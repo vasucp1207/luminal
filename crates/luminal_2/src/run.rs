@@ -300,7 +300,6 @@ pub fn compile_kernels(
         {
             use objc2_foundation::{NSString, ns_string};
             use objc2_metal::{MTLDevice, MTLLibrary};
-
             let lib = device
                 .newLibraryWithSource_options_error(&NSString::from_str(&kernel.code), None)
                 .unwrap();
