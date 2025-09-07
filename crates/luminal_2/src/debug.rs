@@ -45,6 +45,8 @@ pub fn display_multiple_graphs<T: TermToString, E: EdgeToString>(
         .map(|g| View::new(to_display_graph(g, &[])))
         .collect();
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../debugger_icon.png"))
+        .expect("valid PNG");
     let _ = eframe::run_native(
         "Luminal Debugger",
         eframe::NativeOptions {
@@ -52,7 +54,9 @@ pub fn display_multiple_graphs<T: TermToString, E: EdgeToString>(
                 .with_inner_size([if graphs.len() == 1 { 1000.0 } else { 2000.0 }, 1200.0])
                 .with_decorations(false)
                 .with_transparent(true)
-                .with_close_button(true),
+                .with_close_button(true)
+                .with_icon(icon)
+                .with_title("Luminal Debugger"),
             ..Default::default()
         },
         Box::new(move |_cc| Ok(Box::new(Debugger::new(views)))),
@@ -154,7 +158,7 @@ pub struct View {
 impl View {
     pub fn new(g: DisplayGraph) -> Self {
         Self {
-            pos: layered_layout(&g, 140.0, 120.0, 100.0),
+            pos: layered_layout(&g, 400.0, 120.0, 100.0),
             g,
             dragging: None,
             cam: Camera::new(),
@@ -188,7 +192,7 @@ impl Debugger {
         // Rounded background behind everything
         let screen = ctx.screen_rect();
         let rounding = egui::Rounding::same(9.0); // corner radius
-        let bg = Color32::from_rgb(12, 12, 12);
+        let bg = Color32::from_hex("#0D180A").unwrap();
         let bg_painter = ctx.layer_painter(egui::LayerId::background());
         // shrink a hair to avoid clipping the antialiased edge
         bg_painter.rect_filled(screen.shrink(0.5), rounding, bg);
@@ -326,7 +330,7 @@ impl Debugger {
                 };
 
                 // single fill with rounded top corners
-                painter.rect_filled(rect, top_round, Color32::from_rgb(34, 197, 94));
+                painter.rect_filled(rect, top_round, Color32::from_hex("#7FEE640D").unwrap());
 
                 self.draw_title_buttons(ui, ctx, &painter, rect, PAD);
 
@@ -352,7 +356,16 @@ impl Debugger {
                     egui::Align2::CENTER_CENTER,
                     title,
                     egui::FontId::new(14.0, egui::FontFamily::Monospace),
-                    Color32::BLACK,
+                    Color32::from_hex("#7FEE64").unwrap(),
+                );
+
+                // bottom border line
+                painter.line_segment(
+                    [
+                        Pos2::new(rect.left(), rect.bottom() - 1.5),
+                        Pos2::new(rect.right(), rect.bottom() - 1.5),
+                    ],
+                    egui::Stroke::new(3.0, Color32::from_hex("#7FEE64").unwrap()),
                 );
             });
     }
@@ -456,25 +469,50 @@ impl Debugger {
         let font_px = (14.0 * z).clamp(9.0, 48.0);
         let font_id = egui::FontId::monospace(font_px);
 
-        // Draw edges
+        let dragging = view.dragging.map(|i| i as i32); // NodeIndex.index() is i32 under the hood
+
+        // Edges: turn bright green if they touch the dragged node
         for e in view.g.edge_indices() {
             let (u, w) = view.g.edge_endpoints(e).unwrap();
             let pu = view.cam.w2s(origin, view.pos[u.index()]);
             let pw = view.cam.w2s(origin, view.pos[w.index()]);
-            draw_arrow(painter, pu, pw, z, Color32::DARK_GRAY);
+
+            let edge_color = if dragging.is_some()
+                && (u.index() as i32 == dragging.unwrap() || w.index() as i32 == dragging.unwrap())
+            {
+                Color32::from_hex("#7FEE64").unwrap()
+            } else {
+                Color32::DARK_GRAY
+            };
+            draw_arrow(painter, pu, pw, z, edge_color);
         }
 
-        // Draw nodes
+        // Nodes: dragged node becomes bright green
         for nidx in view.g.node_indices() {
             let p = view.cam.w2s(origin, view.pos[nidx.index()]);
             let (label, _, _, _) = &view.g[nidx];
-            draw_node(painter, p, node_r, &view.g[nidx], view.cam.display_mode);
+
+            let override_color = if dragging.is_some() && nidx.index() as i32 == dragging.unwrap() {
+                Some(Color32::from_hex("#7FEE64").unwrap())
+            } else {
+                None
+            };
+
+            draw_node(
+                painter,
+                p,
+                node_r,
+                &view.g[nidx],
+                view.cam.display_mode,
+                override_color,
+            );
+
             painter.text(
                 p + Vec2::new(0.0, -label_dy),
                 egui::Align2::CENTER_CENTER,
                 label,
                 font_id.clone(),
-                Color32::WHITE,
+                Color32::from_hex("#7FEE64").unwrap(),
             );
         }
     }
@@ -618,16 +656,17 @@ fn draw_node(
     p: &egui::Painter,
     c: Pos2,
     r: f32,
-    (_, color, shape, loop_level): &DisplayNode,
+    node: &DisplayNode,
     display_mode: DisplayMode,
+    override_color: Option<Color32>,
 ) {
-    let color = if display_mode == DisplayMode::LoopLevel
-        && let Some(loop_level) = loop_level
-    {
-        rainbow_color(*loop_level)
+    let (_, base, shape, loop_level) = node;
+    let normal = if display_mode == DisplayMode::LoopLevel && loop_level.is_some() {
+        rainbow_color(loop_level.unwrap())
     } else {
-        *color
+        *base
     };
+    let color = override_color.unwrap_or(normal);
     match shape {
         NodeShape::Circle => {
             p.circle_filled(c, r, color);
@@ -908,17 +947,61 @@ impl TermToString for Kernel {
 impl TermToString for GraphTerm {
     fn term_to_string(&self) -> (String, Color32, NodeShape) {
         match self {
-            GraphTerm::Add => ("Add".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Mul => ("Mul".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Max => ("Max".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Exp2 => ("Exp2".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Log2 => ("Log2".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Sin => ("Sin".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Recip => ("Recip".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Neg => ("Neg".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Sqrt => ("Sqrt".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::Mod => ("Mod".to_string(), Color32::GREEN, NodeShape::Circle),
-            GraphTerm::LessThan => ("LessThan".to_string(), Color32::GREEN, NodeShape::Circle),
+            GraphTerm::Add => (
+                "Add".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Mul => (
+                "Mul".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Max => (
+                "Max".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Exp2 => (
+                "Exp2".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Log2 => (
+                "Log2".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Sin => (
+                "Sin".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Recip => (
+                "Recip".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Neg => (
+                "Neg".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Sqrt => (
+                "Sqrt".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::Mod => (
+                "Mod".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
+            GraphTerm::LessThan => (
+                "LessThan".to_string(),
+                Color32::from_hex("#55a042").unwrap(),
+                NodeShape::Circle,
+            ),
             GraphTerm::TCMatmul {
                 a_k_stride,
                 b_k_stride,
@@ -930,7 +1013,7 @@ impl TermToString for GraphTerm {
                 format!(
                     "TCMatmul ({a_k_stride}, {b_k_stride}, {a_inner_stride}, {b_inner_stride}, {c_inner_stride}, {k_outer_loops})"
                 ),
-                Color32::RED,
+                Color32::from_hex("#bf1919").unwrap(),
                 NodeShape::Circle,
             ),
             GraphTerm::LoopIn {
@@ -939,7 +1022,7 @@ impl TermToString for GraphTerm {
                 marker,
             } => (
                 format!("LoopIn ({range}; {stride}; ({marker}))"),
-                Color32::LIGHT_BLUE,
+                Color32::from_hex("#40b2e9").unwrap(),
                 NodeShape::InvertedTriangle,
             ),
             GraphTerm::LoopOut {
@@ -948,12 +1031,14 @@ impl TermToString for GraphTerm {
                 marker,
             } => (
                 format!("LoopOut ({range}; {stride}; ({marker}))"),
-                Color32::BLUE,
+                Color32::from_hex("#4340e9").unwrap(),
                 NodeShape::Triangle,
             ),
-            GraphTerm::GMEM { label } => {
-                (format!("GMEM ({label})"), Color32::GOLD, NodeShape::Square)
-            }
+            GraphTerm::GMEM { label } => (
+                format!("GMEM ({label})"),
+                Color32::from_hex("#a6ad1d").unwrap(),
+                NodeShape::Square,
+            ),
             GraphTerm::SMEM => ("SMEM".to_string(), Color32::YELLOW, NodeShape::Square),
             GraphTerm::Custom(_) => ("CustomKernel".to_string(), Color32::GRAY, NodeShape::Circle),
             GraphTerm::Diff(d) => (format!("Diff({d})"), Color32::GRAY, NodeShape::Circle),
@@ -1016,5 +1101,49 @@ impl TermToString for (GraphTerm, Vec<String>, Vec<usize>) {
             self.0.term_to_string().1,
             NodeShape::Circle,
         )
+    }
+}
+
+/// View a debug graph in the browser
+pub fn display_graph2(
+    graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>,
+    mark_nodes: &[(NodeIndex, &str)],
+) {
+    let mut new_graph = StableGraph::new();
+    let mut map = std::collections::HashMap::new();
+    for node in graph.node_indices() {
+        map.insert(
+            node,
+            new_graph.add_node(graph.node_weight(node).unwrap().term_to_string().0),
+        );
+    }
+    for edge in graph.edge_indices() {
+        let weight = graph.edge_weight(edge).unwrap();
+        let (src, dest) = graph.edge_endpoints(edge).unwrap();
+        new_graph.add_edge(map[&src], map[&dest], weight.edge_to_string());
+    }
+    let mut graph_string = luminal::prelude::petgraph::dot::Dot::with_config(
+        &new_graph,
+        &[luminal::prelude::petgraph::dot::Config::EdgeIndexLabel],
+    )
+    .to_string();
+    let re = regex::Regex::new(r#"label\s*=\s*"\d+""#).unwrap();
+    graph_string = re.replace_all(&graph_string, "").to_string();
+    for (n, color) in mark_nodes {
+        graph_string = graph_string.replace(
+            &format!("    {} [ label =", n.index()),
+            &format!(
+                "    {} [ style=\"filled\" fillcolor=\"{color}\" label =",
+                n.index(),
+            ),
+        );
+    }
+
+    let url = format!(
+        "https://dreampuf.github.io/GraphvizOnline/#{}",
+        urlencoding::encode(&graph_string)
+    );
+    if let Err(e) = webbrowser::open(&url) {
+        panic!("Error displaying graph: {:?}", e);
     }
 }

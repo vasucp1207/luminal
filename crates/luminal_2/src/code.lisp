@@ -68,33 +68,29 @@
 ; -------- IR --------
 (ruleset ir)
 (ruleset ir-prop)
-(ruleset ir-generic)
 (datatype LoopType (Loop String Expression))
+(datatype UnOp
+	(Exp2)
+	(Log2)
+	(Sqrt)
+	(Sin)
+	(Recip)
+	(Neg)
+)
+(datatype BinOp
+	(Add)
+	(Mul)
+	(Max)
+)
 (datatype IR
 	; General kernel stuff
    	(GMEM String)
    	(LoopIn IR LoopType Expression)
    	(LoopOut IR LoopType Expression)
-   	(SMEM)
-   	(SMEMLoad IR IR)
-    (SMEMRead IR IR)
-
-    ; Unary Ops
-   	(Exp2 IR)
-   	(Log2 IR)
-   	(Sqrt IR)
-   	(Sin IR)
-   	(Recip IR)
-   	(Neg IR)
-
-    ; Binary Ops
-   	(Add IR IR)
-   	(Mul IR IR)
-   	(Max IR IR)
 
     ; search helpers
-    (Unary String IR)
-   	(Binary String IR IR)
+    (Unary UnOp IR)
+   	(Binary BinOp IR IR)
 
    	; propogation patterns
    	(SwapLoops IR String String) ; Swap two loops, identified by their strings
@@ -109,68 +105,143 @@
 
    	; tensor core stuff
    	(TCMatmul IR IR Expression Expression Expression Expression Expression Expression) ; input A, input B, A k stride, B k stride, A inner stride, B inner stride, C inner stride, number of K tile loops
-   	(TiledMatmulInputA String i64 Expression)
-    (TiledMatmulInputB String i64 Expression)
+   	(TiledMatmulInputA IR i64 Expression)
+    (TiledMatmulInputB IR i64 Expression)
 )
 
 ; -------------- HELPERS ---------------
 
-; Convert to and from generic unary ops
-(birewrite (Exp2 ?x) (Unary "Exp2" ?x) :ruleset ir-generic)
-(birewrite (Log2 ?x) (Unary "Log2" ?x) :ruleset ir-generic)
-(birewrite (Sqrt ?x) (Unary "Sqrt" ?x) :ruleset ir-generic)
-(birewrite (Sin ?x) (Unary "Sin" ?x) :ruleset ir-generic)
-(birewrite (Recip ?x) (Unary "Recip" ?x) :ruleset ir-generic)
-(birewrite (Neg ?x) (Unary "Neg" ?x) :ruleset ir-generic)
-(birewrite (Add ?a ?b) (Binary "Add" ?a ?b) :ruleset ir-generic)
-(birewrite (Mul ?a ?b) (Binary "Mul" ?a ?b) :ruleset ir-generic)
-(birewrite (Max ?a ?b) (Binary "Max" ?a ?b) :ruleset ir-generic)
-
 ; Communative binary ops
-(rewrite (Binary ?bin ?a ?b) (Binary ?bin ?b ?a) :ruleset ir)
+;(rewrite (Binary ?bin ?a ?b) (Binary ?bin ?b ?a) :ruleset ir)
 ; distributive/associative skeletons so sums and products re-associate
-(rewrite (Add (Add ?a ?b) ?c) (Add ?a (Add ?b ?c)) :ruleset ir)
-(rewrite (Mul (Mul ?a ?b) ?c) (Mul ?a (Mul ?b ?c)) :ruleset ir)
+;(rewrite (Add (Add ?a ?b) ?c) (Add ?a (Add ?b ?c)) :ruleset ir)
+;(rewrite (Mul (Mul ?a ?b) ?c) (Mul ?a (Mul ?b ?c)) :ruleset ir)
 
 ; set containing maccums
 (sort ExpressionSetBase (Set Expression))
 
 ; a single global set, merged by union
-(function MAccumSet () ExpressionSetBase
-  :merge (set-union old new))
+(function MAccumSet () ExpressionSetBase :merge (set-union old new))
 
 ; for every (MAccum ...), add that exact term to the set
-(rule ((= ?e (MAccum ?s)))
-  ((set (MAccumSet) (set-of ?e)))
-  :ruleset ir-prop)
+(rule
+	((= ?e (MAccum ?s)))
+	((set (MAccumSet) (set-of ?e)))
+	:ruleset ir-prop
+)
+
+(function loop_level (IR) i64 :merge (max new old))
+; GMEM (0) -> loopin (0)
+(rule
+	((= out (LoopIn (GMEM g) l1 r1)))
+	(
+		(set (loop_level out) 0)
+		(set (loop_level (GMEM g)) 0)
+	)
+	:ruleset ir-prop
+)
+; non-loopin (n) -> loopout (n - 1)
+(rule
+	(
+		(= curr (LoopOut x l1 r1))
+		(!= x (LoopIn y l2 r2))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) (- xll 1)))
+	:ruleset ir-prop
+)
+; loopin (n) -> binary (n + 1)
+(rule
+	(
+		(= curr (Binary bin x z))
+		(= x (LoopIn y l1 r1))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) (+ xll 1)))
+	:ruleset ir-prop
+)
+; loopin (n) -> unary (n + 1)
+(rule
+	(
+		(= curr (Unary un x))
+		(= x (LoopIn y l1 r1))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) (+ xll 1)))
+	:ruleset ir-prop
+)
+; loopin (n) -> loopin (n + 1)
+(rule
+	(
+		(= curr (LoopIn x l2 r2))
+		(= x (LoopIn y l1 r1))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) (+ xll 1)))
+	:ruleset ir-prop
+)
+; loopin (n) -> loopout (n)
+(rule
+	(
+		(= curr (LoopOut x l1 r1))
+		(= x (LoopIn y l2 r2))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) xll))
+	:ruleset ir-prop
+)
+; loopout (n) -> loopin (n)
+(rule
+	(
+		(= curr (LoopIn x l1 r1))
+		(= x (LoopOut y l2 r2))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) xll))
+	:ruleset ir-prop
+)
+; non-loopin -> binary
+(rule
+	(
+		(= curr (Binary bin a b))
+		(!= a (LoopIn c l2 r2))
+		(= xll (loop_level a))
+	)
+	((set (loop_level curr) xll))
+	:ruleset ir-prop
+)
+; non-loopin -> unary
+(rule
+	(
+		(= curr (Unary un a))
+		(!= a (LoopIn c l2 r2))
+		(= xll (loop_level a))
+	)
+	((set (loop_level curr) xll))
+	:ruleset ir-prop
+)
+; loopin -> tcmatmul
+(rule
+	(
+		(= curr (TCMatmul a b c d e f g h))
+		(= a (LoopIn x l1 r1))
+		(= xll (loop_level a))
+	)
+	((set (loop_level curr) (+ xll 1)))
+	:ruleset ir-prop
+)
+; loopout -> loopout
+(rule
+	(
+		(= curr (LoopOut x l1 r1))
+		(= x (LoopOut y l2 r2))
+		(= xll (loop_level x))
+	)
+	((set (loop_level curr) (- xll 1)))
+	:ruleset ir-prop
+)
 
 ; ---------- RULES ----------
-
-; remove pad loop
-(rewrite
- 	(LoopOut (Unary ?un (LoopIn ?x (Loop ?loop (MNum 1)) (MNum 0))) (Loop ?loop (MNum 1)) (MNum 0))
-	(Unary ?un ?x)
-	 ;:ruleset ir
-)
-(rewrite
- 	(LoopOut (Binary ?bin (LoopIn ?a (Loop ?loop (MNum 1)) (MNum 0)) (LoopIn ?b (Loop ?loop (MNum 1)) (MNum  0))) (Loop ?loop (MNum 1)) (MNum 0))
-	(Binary ?bin ?a ?b)
-	 ;:ruleset ir
-)
-; add pad loop
-(rewrite
-	(LoopOut (Unary ?un ?x) (Loop ?l ?r) ?s)
-	(LoopOut (LoopOut (Unary ?un (LoopIn ?x (Loop "newpad" (MNum 1)) (MNum 0))) (Loop "newpad" (MNum 1)) (MNum 0)) (Loop ?l ?r) ?s)
-	:when ((!= ?r (MNum 1)) (!= ?s (MNum 0)))
-	;:ruleset ir
-)
-(rewrite
-	(LoopOut (Binary ?bin ?a ?b) (Loop ?l ?r) ?s)
-	(LoopOut (LoopOut (Binary ?bin (LoopIn ?a (Loop "newpad" (MNum 1)) (MNum 0)) (LoopIn ?b (Loop "newpad" (MNum 1)) (MNum 0))) (Loop "newpad" (MNum 1)) (MNum 0)) (Loop ?l ?r) ?s)
-	:when ((!= ?r (MNum 1)) (!= ?s (MNum 0)))
-	;:ruleset ir
-)
-
 
 ; Loop Fusion
 (rewrite
@@ -194,6 +265,27 @@
 	(Fused (Binary ?bin ?a ?b))
 	:ruleset ir
 )
+(rewrite
+	(LoopIn (LoopOut (Unary ?un ?a) (Loop ?loopA ?range) ?st) (Loop ?loopB ?range) ?st)
+	(Fused (Unary ?un ?a))
+	:ruleset ir
+)
+(rewrite
+	(LoopIn (LoopIn
+		(LoopOut (LoopOut (Unary ?un ?a) (Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2)
+	(Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Fused (Unary ?un ?a))
+	 :ruleset ir
+)
+(rewrite
+	(LoopIn (LoopIn (LoopIn
+		(LoopOut (LoopOut (LoopOut
+			(Unary ?un ?a)
+		(Loop ?loopA1 ?range1) ?st1) (Loop ?loopA2 ?range2) ?st2) (Loop ?loopA3 ?range3) ?st3)
+	(Loop ?loopB3 ?range3) ?st3) (Loop ?loopB2 ?range2) ?st2) (Loop ?loopB1 ?range1) ?st1)
+	(Fused (Unary ?un ?a))
+	:ruleset ir
+)
 
 ; Tiling
 (rewrite
@@ -208,7 +300,7 @@
 		(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
 	)
 	:when ((> ?range 8) (= (% ?range 8) 0))
-	:ruleset ir
+	;:ruleset ir
 )
 (rewrite
 	(TileLoop (LoopIn ?body (Loop ?loop (MNum ?range)) ?stride) ?loop)
@@ -308,51 +400,51 @@
 	(LoopIn ; k
 		(LoopIn ; n
 			(LoopIn ; m
-				(GMEM ?a)
-				(Loop ?loop_a_mtile (MNum ?m))
+				?a
+				(Loop ?loop_m (MNum ?m))
 				(MMul (MVar "z") (MNum ?k))
 			)
-			(Loop ?loop_a_ntile (MNum ?n))
+			(Loop ?loop_n (MNum ?n))
 			(MNum 0)
 		)
-		(Loop ?loop_a_kouter (MNum ?k))
+		(Loop ?loop_k (MNum ?k))
 		(MVar "z")
 	)
 	(TiledMatmulInputA ?a ?k (MNum (/ ?k 8)))
-	:when ((= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
+	;:when ((= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
 	:ruleset tc
 )
 (rewrite
 	(LoopIn ; k
 		(LoopIn ; n
 			(LoopIn ; m
-				(GMEM ?b)
-				(Loop ?loop_b_mtile (MNum ?m))
+				?b
+				(Loop ?loop_m (MNum ?m))
 				(MNum 0)
 			)
-			(Loop ?loop_b_ntile (MNum ?n))
+			(Loop ?loop_n (MNum ?n))
 			(MVar "z")
 		)
-		(Loop ?loop_b_kouter (MNum ?k))
+		(Loop ?loop_k (MNum ?k))
 		(MMul (MVar "z") (MNum ?n))
 	)
 	(TiledMatmulInputB ?b ?n (MNum (/ ?k 8)))
-	:when ((= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
+	;:when ((= (% ?k 8) 0) (= (% ?m 8) 0) (= (% ?n 8) 0))
 	:ruleset tc
 )
 (rewrite
 	(LoopOut ; m
 		(LoopOut ; n
 			 (LoopOut ; k
-				(Add
-					(Fused (Mul
-						(TiledMatmulInputA ?a ?k ?k_loops)
+				(Binary (Add)
+					(Fused (Binary (Mul)
 						(TiledMatmulInputB ?b ?n ?k_loops)
+						(TiledMatmulInputA ?a ?k ?k_loops)
 					))
 					; accumulator
-					(LoopIn ; k outer
-						(LoopIn ; n tile
-							(LoopIn ; m tile
+					(LoopIn ; k
+						(LoopIn ; n
+							(LoopIn ; m
 								?acc
 								(Loop ?loop_acc_mtile (MNum ?m))
 								(MNum 0)
@@ -383,7 +475,7 @@
 							(LoopIn ; m tile
 								(LoopIn ; n outer
 									(LoopIn ; m outer
-										(GMEM ?a)
+										?a
 										(Loop ?loop_out_m (MNum (/ ?m 8)))
 										(MMul (MVar "z") (MNum (* ?k 8)))
 									)
@@ -401,7 +493,7 @@
 							(LoopIn ; m tile
 								(LoopIn ; n outer
 									(LoopIn ; m outer
-										(GMEM ?b)
+										?b
 										(Loop ?loop_out_m (MNum (/ ?m 8)))
 										(MNum 0)
 									)
@@ -518,30 +610,22 @@
 )
 
 {code}
+
+(ruleset loop-unname)
+(rewrite (Loop ?s ?r) (Loop "" ?r) :ruleset loop-unname)
+
 (run-schedule
-	(saturate ir-generic)
 	(saturate expr)
-)
-(run-schedule
-	(run ir)
+	(let-scheduler bo (back-off))
+	(repeat 1
+		(run-with bo ir)
+		(saturate ir-prop)
+		(saturate expr)
+		(saturate cleanup)
+	)
 	(saturate ir-prop)
-	(saturate expr)
-	(saturate cleanup)
-)
-;(print-size)
-(run-schedule
-	(run ir)
-	(saturate ir-prop)
-	(saturate expr)
-	(saturate cleanup)
-)
-;(print-size)
-(run-schedule
-	(saturate ir-generic)
 	(saturate tc)
+	(saturate loop-unname) ; TODO: we need to get rid of loop names entirely
 )
 
-;(ruleset loop-blank)
-;(rewrite (Loop ?s ?r) (Loop "" ?r) :ruleset loop-blank)
-;(rewrite (MergeLoops ?x ?r ?y) (MergeLoops ?x "" "") :ruleset loop-blank)
-;(run-schedule (run loop-blank))
+;(print-size)

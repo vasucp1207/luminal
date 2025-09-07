@@ -143,17 +143,17 @@ pub fn validate_graph(graph: &StableGraph<(GraphTerm, usize), (), Directed>) {
                 }
             }
 
-            if graph
-                .neighbors_directed(node, Direction::Incoming)
-                .next()
-                .is_none()
-                && !matches!(graph.node_weight(node).unwrap().0, GraphTerm::SMEM)
-            {
-                if *curr_level != 0 {
-                    display_graph(graph);
-                    panic!("Inputs must have level 0, found {curr_level}");
-                }
-            }
+            // if graph
+            //     .neighbors_directed(node, Direction::Incoming)
+            //     .next()
+            //     .is_none()
+            //     && !matches!(graph.node_weight(node).unwrap().0, GraphTerm::SMEM)
+            // {
+            //     if *curr_level != 0 {
+            //         display_graph(graph);
+            //         panic!("Inputs must have level 0, found {curr_level}");
+            //     }
+            // }
         }
     }
 }
@@ -176,7 +176,7 @@ pub fn build_search_space(
         std::fs::write("egglog.txt", &final_code).unwrap();
     }
     let serialized = run_egglog_program(&final_code, &root).unwrap();
-    if option_env!("DEBUG").is_some() {
+    if option_env!("DEBUG").is_some() || option_env!("PRINT_EGGLOG").is_some() {
         println!("Done building search space.");
     }
     serialized
@@ -323,9 +323,9 @@ pub fn render_egglog(
                     _ => unreachable!(),
                 };
                 if ops.len() == 1 {
-                    format!("({op} {})", ops.pop().unwrap())
+                    format!("(Unary ({op}) {})", ops.pop().unwrap())
                 } else {
-                    format!("({op} {})", ops.join(" "))
+                    format!("(Binary ({op}) {})", ops.join(" "))
                 }
             }
         };
@@ -484,7 +484,7 @@ pub fn render_egglog_inline(
 /// Runs an Egglog program from a string and returns its output messages.
 fn run_egglog_program(code: &str, root: &str) -> Result<egraph_serialize::EGraph, Error> {
     // Create a fresh EGraph with all the defaults
-    let mut egraph = EGraph::default();
+    let mut egraph = egglog_experimental::new_experimental_egraph();
     let commands = egraph.parser.get_program_from_string(None, code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;

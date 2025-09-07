@@ -2,7 +2,13 @@ use itertools::Itertools;
 use luminal::{
     prelude::{
         NodeIndex,
-        petgraph::{Directed, Direction, algo::toposort, prelude::StableGraph, visit::EdgeRef},
+        petgraph::{
+            Directed, Direction,
+            algo::toposort,
+            prelude::StableGraph,
+            unionfind::UnionFind,
+            visit::{EdgeRef, NodeIndexable},
+        },
     },
     shape::{Expression, Term},
 };
@@ -14,7 +20,7 @@ use std::{
 
 use crate::{
     GMEMBuffer, GPUArch, GraphTerm, Kernel,
-    debug::display_graph,
+    debug::{display_graph, display_graph2},
     translate::{MetaGraph, SubGraph},
     utils::validate_graph,
 };
@@ -26,32 +32,37 @@ pub const MAX_GRID_X: usize = 2147483647;
 pub const MAX_GRID_YZ: usize = 65535;
 
 pub fn codegen(
-    graph: StableGraph<GraphTerm, (), Directed>,
-    outputs: Vec<NodeIndex>,
+    mut graph: StableGraph<GraphTerm, (), Directed>,
     mut arch: GPUArch,
-    n_graph: usize,
     dyn_vars: &FxHashMap<char, usize>,
 ) -> Option<(
     StableGraph<Kernel, (usize, usize), Directed>,
     HashMap<NodeIndex, usize>,
 )> {
-    // display_graph(&graph);
     let gmems = graph
         .node_weights()
         .filter(|w| matches!(w, GraphTerm::GMEM { .. }))
         .count();
-    let (kernels, output_kernels) = split_kernels(graph.clone(), outputs, n_graph);
-    // Create kernel meta graph to toposort
-    let mut meta_graph = StableGraph::new();
-    for _ in 0..kernels.len() {
-        meta_graph.add_node(Kernel::default());
+    // Remove free-standing GMEMs
+    for node in graph.node_indices().collect_vec() {
+        if matches!(graph.node_weight(node).unwrap(), GraphTerm::GMEM { .. })
+            && graph.neighbors_undirected(node).next().is_none()
+        {
+            graph.remove_node(node);
+        }
     }
-    let global_input = meta_graph.add_node(Kernel {
+    let (kernels, output_kernels) = split_kernels(graph.clone());
+    // Create kernel meta graph to toposort
+    let mut kernel_meta_graph = StableGraph::new();
+    for _ in 0..kernels.len() {
+        kernel_meta_graph.add_node(Kernel::default());
+    }
+    let global_input = kernel_meta_graph.add_node(Kernel {
         code: "Inputs".to_string(),
         outputs: vec![Expression::from('-'); gmems],
         ..Default::default()
     });
-    let global_output = meta_graph.add_node(Kernel {
+    let global_output = kernel_meta_graph.add_node(Kernel {
         code: "Outputs".to_string(),
         ..Default::default()
     });
@@ -60,7 +71,7 @@ pub fn codegen(
     for (n_kernel, (_, inputs, _, _)) in kernels.iter().enumerate() {
         for (n_input, (input_kernel, _)) in inputs.into_iter().enumerate() {
             match input_kernel {
-                GMEMBuffer::PrevKernel { kernel, output } => meta_graph.add_edge(
+                GMEMBuffer::PrevKernel { kernel, output } => kernel_meta_graph.add_edge(
                     NodeIndex::new(*kernel),
                     NodeIndex::new(n_kernel),
                     (*output, n_input),
@@ -76,19 +87,28 @@ pub fn codegen(
                         panic!()
                     };
                     gmem_names.insert(*node, label.clone());
-                    meta_graph.add_edge(global_input, NodeIndex::new(n_kernel), (index, n_input))
+                    kernel_meta_graph.add_edge(
+                        global_input,
+                        NodeIndex::new(n_kernel),
+                        (index, n_input),
+                    )
                 }
             };
         }
     }
     for (i, (output_kernel, output_index)) in output_kernels.clone().into_iter().enumerate() {
-        meta_graph.add_edge(
+        kernel_meta_graph.add_edge(
             NodeIndex::new(output_kernel),
             global_output,
             (output_index, i),
         );
     }
-    for node in toposort(&meta_graph, None).unwrap() {
+    // display_graph2(&kernel_meta_graph, &[]);
+    let Ok(t) = toposort(&kernel_meta_graph, None) else {
+        // TODO: for some reason sometimes there are cycles in the kernel graph
+        return None;
+    };
+    for node in t {
         if kernels.len() <= node.index() {
             continue; // Either input node or output node
         }
@@ -106,7 +126,7 @@ pub fn codegen(
                 panic!("invalid kernel!")
             };
             // Would the input ordering be valid? lets assume it is for now
-            *meta_graph.node_weight_mut(node).unwrap() = custom_kernel.clone();
+            *kernel_meta_graph.node_weight_mut(node).unwrap() = custom_kernel.clone();
             continue;
         }
 
@@ -122,7 +142,7 @@ pub fn codegen(
             else {
                 panic!("invalid kernel!")
             };
-            meta_graph.node_weight_mut(node).unwrap().code = format!("Diff{diff}");
+            kernel_meta_graph.node_weight_mut(node).unwrap().code = format!("Diff{diff}");
             continue;
         }
 
@@ -270,8 +290,6 @@ pub fn codegen(
                         ", threadgroup float* sm [[threadgroup(0)]]".to_string(),
                     )
                 };
-                // println!("is this getting reached?");
-
                 format!(
                     "#include <metal_stdlib>
 using namespace metal;
@@ -305,7 +323,7 @@ kernel void kernel_name(
         if grid[2].exec(dyn_vars).unwrap() > MAX_GRID_YZ {
             return None;
         }
-        *meta_graph.node_weight_mut(node).unwrap() = Kernel {
+        *kernel_meta_graph.node_weight_mut(node).unwrap() = Kernel {
             code: kernel,
             grid: (grid[0], grid[1], grid[2]),
             threadblock: (threadblock[0], threadblock[1], threadblock[2]),
@@ -313,7 +331,7 @@ kernel void kernel_name(
             outputs: outputs.into_iter().map(|(o, _)| o.simplify()).collect(),
         };
     }
-    Some((meta_graph, gmem_mapping))
+    Some((kernel_meta_graph, gmem_mapping))
 }
 
 fn var_to_char(var: usize) -> String {
@@ -770,8 +788,9 @@ fn make_kernel(
                     }
                 }
             }
-            GraphTerm::LoopOut { range, stride, .. } => {
-                panic!("found loopout range: {range} stride: {stride}")
+            GraphTerm::LoopOut { .. } => {
+                return None; // TODO: why do we ever see this? should be able to panic here.
+                // panic!("found loopout range: {range} stride: {stride}")
             }
             GraphTerm::Custom(_) | GraphTerm::Diff(_) | GraphTerm::Break => {
                 unreachable!("this should be handled directly in codegen!")
@@ -923,19 +942,21 @@ fn make_kernel(
                     format!(
                         "
 // TensorCore loop
-simdgroup_float8x8 acc = simdgroup_float8x8(0);
-for (uint tc_loop = 0; tc_loop < {}; tc_loop++) {{
-    threadgroup_barrier(mem_flags::mem_threadgroup); // For some reason this speeds it up
+{{
+	simdgroup_float8x8 acc = simdgroup_float8x8(0);
+	for (uint tc_loop = 0; tc_loop < {}; tc_loop++) {{
+	    threadgroup_barrier(mem_flags::mem_threadgroup); // For some reason this speeds it up
 
-    // Load sources into simdgroup matricies
-    simdgroup_float8x8 simdA;
-    simdgroup_load(simdA, {} + {}, {});
-    simdgroup_float8x8 simdB;
-    simdgroup_load(simdB, {} + {}, {});
+	    // Load sources into simdgroup matricies
+	    simdgroup_float8x8 simdA;
+	    simdgroup_load(simdA, {} + {}, {});
+	    simdgroup_float8x8 simdB;
+	    simdgroup_load(simdB, {} + {}, {});
 
-    simdgroup_multiply_accumulate(acc, simdA, simdB, acc);
-}}
-simdgroup_store(acc, {}, {});",
+	    simdgroup_multiply_accumulate(acc, simdA, simdB, acc);
+	}}
+	simdgroup_store(acc, {}, {});
+}}",
                         k_outer_loops.to_kernel(),
                         var_to_char(src_a),
                         a_k_stride.to_kernel().replace("const_z", "tc_loop"),
@@ -998,8 +1019,6 @@ fn toposort_subset<N, E>(
 /// add kernel dimensions so that all loop-to-loop dependencies are between seperate kernels or on the threadblock / thread levels
 fn split_kernels(
     graph: StableGraph<GraphTerm, (), Directed>,
-    outputs: Vec<NodeIndex>,
-    _n_graph: usize,
 ) -> (
     Vec<(
         StableGraph<(GraphTerm, usize), (), Directed>,
@@ -1009,36 +1028,35 @@ fn split_kernels(
     )>,
     Vec<(usize, usize)>, // Output kernels
 ) {
-    // Mark level of ops in graph
     let mut marked_graph = StableGraph::new();
-    let mut map = HashMap::<NodeIndex, NodeIndex>::default();
     // Add nodes
-    let chosen_root = outputs[0];
     let mut to_remove = vec![];
     for node in graph.node_indices().sorted() {
         let mut levels = FxHashSet::default();
-        if node == chosen_root {
+        if graph
+            .neighbors_directed(node, Direction::Outgoing)
+            .next()
+            .is_none()
+        {
             levels.insert(0);
         }
         // Ensure node indexes match between original and marked graph by making dummy indexes if needed
         for _ in marked_graph.node_count()..node.index() {
             to_remove.push(marked_graph.add_node((GraphTerm::Add, vec![], HashSet::default())));
         }
-        let new_node = marked_graph.add_node((graph[node].clone(), vec![], levels));
-        map.insert(node, new_node);
+        marked_graph.add_node((graph[node].clone(), vec![], levels));
     }
     for n in to_remove {
         marked_graph.remove_node(n);
     }
-    let outputs = outputs.into_iter().map(|n| map[&n]).collect_vec();
     // Add edges
     for edge in graph.edge_indices() {
         let (start, end) = graph.edge_endpoints(edge).unwrap();
-        marked_graph.add_edge(map[&start], map[&end], *graph.edge_weight(edge).unwrap());
+        marked_graph.add_edge(start, end, *graph.edge_weight(edge).unwrap());
     }
 
     // Assign loop levels
-    let mut seen = outputs.iter().copied().collect::<HashSet<_>>();
+    let mut seen = graph.externals(Direction::Outgoing).collect::<HashSet<_>>();
     let mut dfs = seen
         .iter()
         .flat_map(|n| marked_graph.neighbors_directed(*n, Direction::Incoming))
@@ -1060,7 +1078,7 @@ fn split_kernels(
             }
             if matches!(curr_term, GraphTerm::LoopIn { .. }) {
                 if neighbor_levels.is_empty() {
-                    display_graph(&marked_graph);
+                    display_graph2(&marked_graph, &[]);
                 }
                 neighbor_levels.pop().unwrap();
             }
@@ -1085,7 +1103,6 @@ fn split_kernels(
         dfs.extend(marked_graph.neighbors_undirected(n));
     }
     // Assign kernel numbers
-    let mut n_kernels = 1;
     for node in toposort(&marked_graph, None).unwrap().into_iter().rev() {
         let (term, curr_level, curr_kernel) = marked_graph[node].clone();
         for source in marked_graph
@@ -1093,6 +1110,7 @@ fn split_kernels(
             .collect_vec()
         {
             let (src_term, _, src_kernel) = marked_graph.node_weight_mut(source).unwrap();
+            // TODO: this conditional is gross
             if (matches!(term, GraphTerm::LoopIn { .. })
                 && matches!(src_term, GraphTerm::LoopOut { .. })
                 && curr_level.len() < GRID_DIMS + THREADBLOCK_DIMS)
@@ -1106,127 +1124,35 @@ fn split_kernels(
                 if min_src <= max_curr {
                     let max_kernel = curr_kernel
                         .iter()
-                        .max()
                         .map(|i| *i + 1)
-                        .unwrap()
-                        .max(*src_kernel.iter().max().unwrap_or(&0));
-                    n_kernels = n_kernels.max(max_kernel + 2);
+                        .chain(src_kernel.iter().copied())
+                        .max()
+                        .unwrap_or(0);
                     src_kernel.clear();
                     src_kernel.insert(max_kernel + 1);
                 }
             } else {
-                for k in &curr_kernel {
-                    if !src_kernel.contains(k) {
-                        src_kernel.insert(*k);
-                    }
-                }
+                src_kernel.extend(curr_kernel.iter().copied());
             }
         }
     }
 
-    // Prune out unnessecary kernel members
-    let mut seen = FxHashSet::default();
-    let mut dfs_stack = marked_graph
-        .neighbors_directed(chosen_root, Direction::Incoming)
-        .collect_vec();
-    while let Some(node) = dfs_stack.pop() {
-        let (term, curr_level, mut curr_kernel) = marked_graph.node_weight(node).unwrap().clone();
-        let split_cond = curr_level.len() < GRID_DIMS + THREADBLOCK_DIMS
-            && matches!(term, GraphTerm::LoopOut { .. });
-        curr_kernel.retain(|k| {
-            matches!(term, GraphTerm::Custom(_) | GraphTerm::Diff(_))
-                || marked_graph
-                    .neighbors_directed(node, Direction::Outgoing)
-                    .any(|n| {
-                        ((split_cond || matches!(marked_graph[n].0, GraphTerm::Diff(_)))
-                            && matches!(
-                                marked_graph[n].0,
-                                GraphTerm::LoopIn { .. }
-                                    | GraphTerm::Diff(_)
-                                    | GraphTerm::Custom(_)
-                            ))
-                            || marked_graph[n].2.contains(k)
-                    })
-        });
-        if marked_graph.node_weight_mut(node).unwrap().2.len() != curr_kernel.len()
-            || !seen.contains(&node)
-        {
-            dfs_stack.extend(marked_graph.neighbors_directed(node, Direction::Incoming));
-            seen.insert(node);
-        }
-        marked_graph.node_weight_mut(node).unwrap().2 = curr_kernel;
+    // Split disjoint kernels into unique kernels
+    reassign_disjoint_kernels(&mut marked_graph);
+
+    // Remove holes in the kernel index count (0, 1, 3, 4) -> (0, 1, 2, 3)
+    let remap: FxHashMap<usize, usize> = marked_graph
+        .node_weights()
+        .flat_map(|(_, _, k)| k.iter().copied())
+        .sorted_unstable()
+        .dedup()
+        .enumerate()
+        .map(|(i, k)| (k, i))
+        .collect();
+    for (_, _, ks) in marked_graph.node_weights_mut() {
+        *ks = ks.drain().map(|k| remap[&k]).collect();
     }
 
-    // Disallow disjoint nodes to be in the same kernel
-    let mut by_kernel: HashMap<usize, Vec<NodeIndex>> = HashMap::new();
-    for n in marked_graph.node_indices() {
-        for &k in &marked_graph[n].2 {
-            // field 2 == Vec<usize> of kernel IDs
-            by_kernel.entry(k).or_default().push(n);
-        }
-    }
-    use std::collections::{HashSet, VecDeque};
-    let mut next_kernel = n_kernels; // keep issuing fresh IDs
-
-    for (k, nodes) in by_kernel {
-        let mut seen: HashSet<NodeIndex> = HashSet::new();
-
-        for &seed in &nodes {
-            if seen.contains(&seed) {
-                continue;
-            }
-
-            // BFS restricted to nodes that still carry -k-
-            let mut q = VecDeque::from([seed]);
-            let mut comp: Vec<NodeIndex> = Vec::new();
-            while let Some(v) = q.pop_front() {
-                if !seen.insert(v) {
-                    continue;
-                }
-                comp.push(v);
-                for nb in marked_graph.neighbors_undirected(v) {
-                    if marked_graph[nb].2.contains(&k) {
-                        q.push_back(nb);
-                    }
-                }
-            }
-
-            // first component keeps k; extra components get fresh IDs
-            if !comp.is_empty() && seed != nodes[0] {
-                let new_k = {
-                    next_kernel += 1;
-                    next_kernel - 1
-                };
-                for v in comp {
-                    let kernels = &mut marked_graph.node_weight_mut(v).unwrap().2;
-                    kernels.retain(|id| *id != k);
-                    kernels.insert(new_k);
-                }
-            }
-        }
-    }
-    n_kernels = next_kernel;
-    // Remove / decrement kernels that have no nodes (pruning could have removed all presence of a kernel)
-    for kernel in (0..n_kernels).rev() {
-        let mut seen = false;
-        for (_, _, kernels) in marked_graph.node_weights() {
-            if kernels.contains(&kernel) {
-                seen = true;
-                break;
-            }
-        }
-        if !seen {
-            for (_, _, kernels) in marked_graph.node_weights_mut() {
-                for k in kernels.clone().iter() {
-                    if *k > kernel {
-                        kernels.remove(k);
-                        kernels.insert(*k - 1);
-                    }
-                }
-            }
-            n_kernels -= 1;
-        }
-    }
     // Add kernel barriers
     for edge in marked_graph.edge_indices().collect_vec() {
         let (mut src, mut dest) = marked_graph.edge_endpoints(edge).unwrap();
@@ -1238,12 +1164,10 @@ fn split_kernels(
             let mut curr = src;
             let mut total_size = Expression::from(0);
             loop {
-                match marked_graph[curr].0 {
-                    GraphTerm::LoopOut { range, stride, .. } => {
-                        total_size = total_size.max(stride.substitute('z', range));
-                    }
-                    _ => break,
-                }
+                let GraphTerm::LoopOut { range, stride, .. } = marked_graph[curr].0 else {
+                    break;
+                };
+                total_size = total_size.max(stride.substitute('z', range));
                 curr = marked_graph
                     .neighbors_directed(curr, Direction::Incoming)
                     .next()
@@ -1280,6 +1204,11 @@ fn split_kernels(
     }
 
     // Place nodes in kernel graphs
+    let n_kernels = 1 + *marked_graph
+        .node_weights()
+        .flat_map(|(_, _, k)| k)
+        .max()
+        .expect("No kernels found!?");
     let mut kernel_graphs = (0..n_kernels)
         .map(|_| (StableGraph::new(), vec![], vec![], vec![]))
         .collect_vec();
@@ -1293,7 +1222,10 @@ fn split_kernels(
                 node,
                 kernel_graph.add_node((term.clone(), loop_level.len())),
             );
-            if let Some(ind) = outputs.iter().position(|n| *n == node) {
+            if let Some(ind) = marked_graph
+                .externals(Direction::Outgoing)
+                .position(|n| n == node)
+            {
                 final_outputs.insert(ind, (*kernel, curr_outputs.len()));
                 curr_outputs.push((Expression::default(), node_maps[*kernel][&node]));
             }
@@ -1390,7 +1322,7 @@ fn split_kernels(
             if !matches!(kernel_graph[*input].0, GraphTerm::GMEM { .. }) {
                 let new_input = kernel_graph.add_node((
                     GraphTerm::GMEM {
-                        label: "Output".to_string(),
+                        label: "Kernel Input".to_string(),
                     },
                     0,
                 ));
@@ -1402,7 +1334,7 @@ fn split_kernels(
             if !matches!(kernel_graph[*output].0, GraphTerm::GMEM { .. }) {
                 let new_output = kernel_graph.add_node((
                     GraphTerm::GMEM {
-                        label: "Output".to_string(),
+                        label: "Kernel Output".to_string(),
                     },
                     0,
                 ));
@@ -1422,10 +1354,23 @@ fn split_kernels(
                 } else if !matches!(term, GraphTerm::GMEM { .. }) {
                     break;
                 }
-                curr = kernel_graph
+                if kernel_graph
                     .neighbors_directed(curr, Direction::Incoming)
                     .next()
-                    .unwrap();
+                    .is_none()
+                {
+                    display_graph2(&kernel_graph, &[]);
+                    display_graph2(&marked_graph, &[]);
+                    display_graph2(&graph, &[]);
+                }
+                if let Some(c) = kernel_graph
+                    .neighbors_directed(curr, Direction::Incoming)
+                    .next()
+                {
+                    curr = c;
+                } else {
+                    break;
+                }
             }
             *size = new_size.simplify();
         }
@@ -1441,14 +1386,79 @@ fn split_kernels(
     )
 }
 
+/// if we have multiple disjoint sets of terms, they need different kernel indexes
+fn reassign_disjoint_kernels(
+    g: &mut StableGraph<(GraphTerm, Vec<Expression>, FxHashSet<usize>), ()>,
+) {
+    // remove gmem kernel ids
+    for (term, _, kernels) in g.node_weights_mut() {
+        if matches!(term, GraphTerm::GMEM { .. }) {
+            kernels.clear();
+        }
+    }
+    // Build i -> nodes and find current max index
+    let next_kernel_idx = *g.node_weights().flat_map(|(_, _, k)| k).max().unwrap_or(&0);
+    let idx_to_nodes = g
+        .node_indices()
+        .flat_map(|n| g[n].2.iter().copied().map(move |i| (i, n)))
+        .into_group_map();
+
+    // For each i, find connected components in the subgraph induced by nodes containing i
+    for (i, nodes) in idx_to_nodes {
+        if nodes.len() <= 1 {
+            continue;
+        }
+
+        // Union-Find over only edges inside the induced subgraph
+        let mut uf = UnionFind::new(g.node_bound());
+        for e in g.edge_indices() {
+            let (u, v) = g.edge_endpoints(e).unwrap();
+            if nodes.contains(&u) && nodes.contains(&v) {
+                uf.union(u.index(), v.index());
+            }
+        }
+
+        // Collect components
+        let comps = nodes
+            .iter()
+            .map(|n| (uf.find(n.index()), *n))
+            .into_group_map();
+        if comps.len() <= 1 {
+            continue;
+        }
+
+        // Keep largest; rename `i` in others
+        for (n_group, comp) in comps
+            .into_values()
+            .sorted_by_key(|c| c.len())
+            .rev()
+            .skip(1)
+            .enumerate()
+        {
+            for n in comp {
+                let ws = &mut g.node_weight_mut(n).unwrap().2;
+                if ws.remove(&i) {
+                    ws.insert(next_kernel_idx + n_group + 1);
+                }
+            }
+        }
+    }
+
+    // re-add kernel ids
+    for i in g.node_indices().collect_vec() {
+        if matches!(g[i].0, GraphTerm::GMEM { .. }) {
+            g.node_weight_mut(i).unwrap().2 = g
+                .neighbors_directed(i, Direction::Outgoing)
+                .flat_map(|n| &g[n].2)
+                .copied()
+                .collect();
+        }
+    }
+}
+
 pub fn stitch_meta_graph_together(
     meta_graph: MetaGraph,
-    outputs: Vec<(NodeIndex, NodeIndex)>,
-) -> (
-    SubGraph,
-    FxHashMap<(NodeIndex, NodeIndex), NodeIndex>,
-    Vec<NodeIndex>,
-) {
+) -> (SubGraph, FxHashMap<(NodeIndex, NodeIndex), NodeIndex>) {
     let mut out = SubGraph::new();
 
     // (meta_node, inner_node) -> stitched node (no entry for break_in placeholders)
@@ -1477,8 +1487,6 @@ pub fn stitch_meta_graph_together(
             }
         }
     }
-    // translate outputs
-    let new_outputs = outputs.into_iter().map(|k| map[&k]).collect();
 
     // 2) copy inner edges (skip edges touching placeholders; record placeholder -> target)
     for m in meta_graph.node_indices() {
@@ -1522,13 +1530,13 @@ pub fn stitch_meta_graph_together(
         }
     }
 
-    (out, map, new_outputs)
+    (out, map)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GPUArch, GraphTerm, Kernel, translate::SubGraph};
+    use crate::{GPUArch, GraphTerm, translate::SubGraph};
     use std::collections::HashMap;
 
     #[test]
@@ -1537,15 +1545,6 @@ mod tests {
         assert_eq!(var_to_char(25), "z");
         assert_eq!(var_to_char(26), "ba");
         assert_eq!(var_to_char(27), "bb");
-    }
-
-    #[test]
-    fn test_max_constants() {
-        assert_eq!(MAX_THREADBLOCK_SIZE, 1024);
-        assert_eq!(MAX_GRID_X, 2147483647);
-        assert_eq!(MAX_GRID_YZ, 65535);
-        assert_eq!(GRID_DIMS, 2);
-        assert_eq!(THREADBLOCK_DIMS, 1);
     }
 
     #[test]
@@ -1606,13 +1605,11 @@ mod tests {
     }
 
     #[test]
-    fn test_stitch_meta_graph_empty() {
-        let meta_graph: StableGraph<SubGraph, (NodeIndex, NodeIndex), Directed> =
+    fn test_stitch_kernel_meta_graph_empty() {
+        let kernel_meta_graph: StableGraph<SubGraph, (NodeIndex, NodeIndex), Directed> =
             StableGraph::new();
-        let outputs = vec![];
-        let (stitched, map, new_outputs) = stitch_meta_graph_together(meta_graph, outputs);
+        let (stitched, map) = stitch_meta_graph_together(kernel_meta_graph);
         assert_eq!(stitched.node_count(), 0);
         assert!(map.is_empty());
-        assert!(new_outputs.is_empty());
     }
 }

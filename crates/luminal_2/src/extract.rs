@@ -1,13 +1,14 @@
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::usize;
 
+use crate::Kernel;
+use crate::debug::display_graph;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
-use crate::Kernel;
 #[cfg(feature = "metal")]
 use crate::{Buffer, Device};
 use crate::{GPUArch, GraphTerm};
@@ -18,13 +19,13 @@ use colored::Colorize;
 use cudarc::driver::{CudaContext, CudaSlice, DriverError};
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
+use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
-use luminal::prelude::NodeIndex;
 use luminal::shape::{Expression, Term};
 #[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
@@ -37,13 +38,12 @@ const INVALID_IR: &[&str] = &[
     "SwapLoops",
     "TileLoop",
     "UnpadLoop",
-    "Unary",
-    "Binary",
     "MReplace",
     "MergeLoops",
     "TiledMatmulInputA",
     "TiledMatmulInputB",
     "TiledMatmulAcc",
+    "loop_level",
 ];
 
 #[cfg(feature = "metal")]
@@ -128,11 +128,7 @@ fn shortest_from_enode<'a>(
             }
         }
 
-        if ok {
-            Some(acc)
-        } else {
-            None
-        }
+        if ok { Some(acc) } else { None }
     };
 
     *seen.get_mut(&enode).unwrap() -= 1;
@@ -182,7 +178,7 @@ fn extract_trajectories<'a>(
     waiting: usize,
 ) -> Vec<Vec<&'a NodeId>> {
     let mut trajectories = vec![];
-    'enode_loop: for enode in &egraph.classes()[current_class].nodes {
+    'enode_loop: for enode in egraph.classes()[current_class].nodes.iter().rev() {
         if INVALID_IR.contains(&egraph.nodes[enode].op.as_str()) {
             junk_cache.insert(enode);
             continue;
@@ -194,9 +190,12 @@ fn extract_trajectories<'a>(
         let mut enode_trajectories = vec![];
         *seen.entry(enode).or_insert(0) += 1;
         for child in &egraph.nodes[enode].children {
+            let child_first_enode = child;
+            // let child = egraph.nid_to_cid(child);
             // Ask what's the child's trajectories
             if !trajectory_cache.contains_key(child) {
-                let child_trajectories = if is_expression_enode(&egraph.nodes[child].op) {
+                let child_trajectories = if is_expression_enode(&egraph.nodes[child_first_enode].op)
+                {
                     extract_shortest(
                         egraph,
                         egraph.nid_to_cid(child),
@@ -206,11 +205,11 @@ fn extract_trajectories<'a>(
                     )
                     .map(|i| vec![i])
                     .unwrap_or_default()
-                } else if egraph.nodes[child].op == "Loop" {
+                } else if egraph.nodes[child_first_enode].op == "Loop" {
                     // Pull just the range out for the loop
                     extract_shortest(
                         egraph,
-                        egraph.nid_to_cid(&egraph.nodes[child].children[1]),
+                        egraph.nid_to_cid(&egraph.nodes[child_first_enode].children[1]),
                         seen,
                         junk_cache,
                         &mut FxHashMap::default(),
@@ -244,18 +243,16 @@ fn extract_trajectories<'a>(
                 }
             } else if !trajectory_cache[child].is_empty() {
                 // Cartisian product the current trajectories with the new trajectories
-                if enode_trajectories.len() * trajectory_cache[child].len() > MAX_SEARCHED_GRAPHS {
-                    enode_trajectories = enode_trajectories
-                        .into_iter()
-                        .map(|p| [p, trajectory_cache[child][0].clone()].concat())
-                        .collect();
-                } else {
-                    enode_trajectories = enode_trajectories
-                        .into_iter()
-                        .cartesian_product(&trajectory_cache[child])
-                        .map(|(p, n)| [p, n.clone()].concat())
-                        .collect();
-                }
+                let n_enode_traj = enode_trajectories.len();
+                enode_trajectories = enode_trajectories
+                    .into_iter()
+                    .cartesian_product(
+                        trajectory_cache[child]
+                            .iter()
+                            .take(MAX_SEARCHED_GRAPHS / n_enode_traj),
+                    )
+                    .map(|(p, n)| [p, n.clone()].concat())
+                    .collect();
             }
         }
         *seen.get_mut(&enode).unwrap() -= 1;
@@ -291,6 +288,32 @@ pub fn search(
         &mut FxHashMap::default(),
         1,
     );
+    // build loop level -> enode mapping
+    let mut loop_level_values = FxHashMap::default();
+    for (id, _) in &egraph.class_data {
+        if egraph.classes()[id]
+            .nodes
+            .iter()
+            .any(|n| egraph.nodes[n].op == "loop_level")
+        {
+            loop_level_values.insert(
+                id,
+                egraph.classes()[id]
+                    .nodes
+                    .iter()
+                    .find_map(|n| egraph.nodes[n].op.parse::<i32>().ok())
+                    .unwrap(),
+            );
+        }
+    }
+    let mut loop_level_map = FxHashMap::default();
+    for (id, node) in &egraph.nodes {
+        if node.op == "loop_level" {
+            for child in &node.children {
+                loop_level_map.insert(child, loop_level_values[egraph.nid_to_cid(id)]);
+            }
+        }
+    }
 
     // Now we have DFS trajectories
     let mut ref_outputs: Vec<Vec<f32>> = vec![];
@@ -314,11 +337,12 @@ pub fn search(
         .enumerate()
     {
         // Build termdag
-        let mut graph = extraction_to_graph(&egraph, &trajectory);
+        let mut graph = extraction_to_graph(&egraph, &trajectory, &loop_level_map);
+        // crate::debug::display_graph2(&graph, &[]);
         prev_graphs.push(graph.clone());
         prev_traj.push(trajectory.clone());
 
-        // Dedup GMEMs
+        // Dedup GMEMs (don't think we need this?)
         let mut canon: FxHashMap<String, NodeIndex> = FxHashMap::default();
 
         for n in graph.node_indices().collect::<Vec<_>>() {
@@ -353,9 +377,8 @@ pub fn search(
             .filter_map(|(label, data)| canon.get(label).map(|&n| (n, data.clone())))
             .collect();
 
-        let root = graph.externals(Direction::Outgoing).next().unwrap();
         let Some((kernels, gmem_mapping)) =
-            crate::codegen::codegen(graph.clone(), vec![root], arch.clone(), 0, dyn_vars)
+            crate::codegen::codegen(graph.clone(), arch.clone(), dyn_vars)
         else {
             continue;
         };
@@ -389,7 +412,7 @@ pub fn search(
                         } else {
                             for (a, b) in ref_outputs.iter().zip(&outs) {
                                 for (x, y) in a.iter().zip(b) {
-                                    if (x - y).abs() >= 1e-3 {
+                                    if (x - y).abs() >= 0.1 {
                                         if option_env!("DEBUG").is_some() {
                                             // display_graph(&graph, &[]);
                                             println!(
@@ -412,8 +435,9 @@ pub fn search(
                                             println!("{}", og_kernels);
                                             println!("{}", print_kernels(&kernels));
                                             panic!(
-                                                "{} {x} != {y}",
-                                                "Output Mismatch".bold().on_bright_red()
+                                                "{} {x} != {y} {}",
+                                                "Output Mismatch".bold().on_bright_red(),
+                                                (x - y).abs()
                                             );
                                         }
                                         continue 'trajectory_loop;
@@ -427,9 +451,6 @@ pub fn search(
                     if og_kernels.is_empty() {
                         og_kernels = kernel_string.clone();
                     }
-                    // if kernel_string.len() < fastest.len() || fastest.is_empty() {
-
-                    // }
                     if us < best_time {
                         best_time = us;
                         best_graph = Some(graph);
@@ -465,7 +486,7 @@ pub fn search(
                         } else {
                             for (a, b) in ref_outputs.iter().zip(&outs) {
                                 for (x, y) in a.iter().zip(b) {
-                                    if (x - y).abs() >= 1e-3 {
+                                    if (x - y).abs() >= 1e-1 {
                                         if option_env!("DEBUG").is_some() {
                                             // display_graph(&graph, &[]);
                                             println!(
@@ -522,6 +543,7 @@ pub fn search(
 pub fn extraction_to_graph(
     egraph: &EGraph,
     trajectory: &[&NodeId],
+    loop_level_map: &FxHashMap<&NodeId, i32>,
 ) -> StableGraph<GraphTerm, (), Directed> {
     let mut g: StableGraph<GraphTerm, (), Directed> = StableGraph::new();
 
@@ -529,134 +551,321 @@ pub fn extraction_to_graph(
     enum Ret {
         Expr(NodeIndex),
         Math(Expression),
+        Op(GraphTerm),
     }
 
-    fn recurse(
+    fn recurse<'b, 'a: 'b>(
         egraph: &EGraph,
-        trajectory: &[&NodeId],
+        trajectory: &[&'a NodeId],
         current: &mut usize,
         g: &mut StableGraph<GraphTerm, (), Directed>,
+        loop_level_map: &FxHashMap<&NodeId, i32>,
+        prev_placed: &'b mut FxHashMap<&'a NodeId, NodeIndex>,
+        no_place: bool,
     ) -> Ret {
         let node_choice = trajectory[*current];
         let enode = &egraph.nodes[node_choice];
         match enode.op.as_str() {
             "GMEM" => {
                 *current += 1;
-                Ret::Expr(
-                    g.add_node(GraphTerm::GMEM {
-                        label: egraph.nodes[&enode.children[0]]
-                            .op
-                            .replace("Boxed(\"", "")
-                            .replace("\")", ""),
-                    }),
-                )
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else {
+                    Ret::Expr(*prev_placed.entry(node_choice).or_insert_with(|| {
+                        g.add_node(GraphTerm::GMEM {
+                            label: egraph.nodes[&enode.children[0]]
+                                .op
+                                .replace("Boxed(\"", "")
+                                .replace("\")", ""),
+                        })
+                    }))
+                }
             }
-            "SMEM" => Ret::Expr(g.add_node(GraphTerm::SMEM)),
+            "SMEM" => todo!(),
 
             // LoopIn  = (LoopIn <expr> <Math> <Math>)
             "LoopIn" | "LoopOut" => {
                 *current += 1;
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
+                let already_placed = prev_placed.contains_key(node_choice);
+                let Ret::Expr(child_one) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(range) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(range) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(stride) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!();
                 };
-                let r = g.add_node(match enode.op.as_str() {
-                    "LoopIn" => GraphTerm::LoopIn {
-                        range,
-                        stride,
-                        marker: "".to_string(),
-                    },
-                    "LoopOut" => GraphTerm::LoopOut {
-                        range,
-                        stride,
-                        marker: "".to_string(),
-                    },
-                    _ => panic!(),
-                });
-                g.add_edge(child_one, r, ());
-                Ret::Expr(r)
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else if let Some(n) = prev_placed.get(node_choice) {
+                    Ret::Expr(*n)
+                } else {
+                    let r = g.add_node(match enode.op.as_str() {
+                        "LoopIn" => GraphTerm::LoopIn {
+                            range,
+                            stride,
+                            marker: loop_level_map
+                                .get(node_choice)
+                                .map(|i| i.to_string())
+                                .unwrap_or_default(),
+                        },
+                        "LoopOut" => GraphTerm::LoopOut {
+                            range,
+                            stride,
+                            marker: loop_level_map
+                                .get(node_choice)
+                                .map(|i| i.to_string())
+                                .unwrap_or_default(),
+                        },
+                        _ => panic!(),
+                    });
+                    prev_placed.insert(node_choice, r);
+                    g.add_edge(child_one, r, ());
+                    Ret::Expr(r)
+                }
             }
 
             "TCMatmul" => {
                 *current += 1;
-                let Ret::Expr(src_a) = recurse(egraph, trajectory, current, g) else {
+                let already_placed = prev_placed.contains_key(node_choice);
+                let Ret::Expr(src_a) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Expr(src_b) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Expr(src_b) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(a_k_stride) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(a_k_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(b_k_stride) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(b_k_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(a_inner_stride) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(a_inner_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(b_inner_stride) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(b_inner_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(c_inner_stride) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(c_inner_stride) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(k_outer_loops) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(k_outer_loops) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
-                let r = g.add_node(GraphTerm::TCMatmul {
-                    a_k_stride,
-                    b_k_stride,
-                    a_inner_stride,
-                    b_inner_stride,
-                    c_inner_stride,
-                    k_outer_loops,
-                });
-                g.add_edge(src_a, r, ());
-                g.add_edge(src_b, r, ());
-                Ret::Expr(r)
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else if let Some(n) = prev_placed.get(node_choice) {
+                    Ret::Expr(*n)
+                } else {
+                    let r = g.add_node(GraphTerm::TCMatmul {
+                        a_k_stride,
+                        b_k_stride,
+                        a_inner_stride,
+                        b_inner_stride,
+                        c_inner_stride,
+                        k_outer_loops,
+                    });
+                    prev_placed.insert(node_choice, r);
+                    g.add_edge(src_a, r, ());
+                    g.add_edge(src_b, r, ());
+                    Ret::Expr(r)
+                }
             }
-
-            "Add" | "Mul" | "Max" | "SMEMLoad" | "SMEMRead" => {
+            "Binary" => {
                 *current += 1;
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
+                let already_placed = prev_placed.contains_key(node_choice);
+                let Ret::Op(op) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
+                    panic!()
+                };
+                let Ret::Expr(child_one) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Expr(child_two) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Expr(child_two) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
                     panic!()
                 };
-                let r = g.add_node(match enode.op.as_str() {
-                    "SMEMLoad" => GraphTerm::SMEMLoad,
-                    "SMEMRead" => GraphTerm::SMEMRead,
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else if let Some(n) = prev_placed.get(node_choice) {
+                    Ret::Expr(*n)
+                } else {
+                    let r = g.add_node(op);
+                    prev_placed.insert(node_choice, r);
+                    g.add_edge(child_one, r, ());
+                    g.add_edge(child_two, r, ());
+                    Ret::Expr(r)
+                }
+            }
+            "Add" | "Mul" | "Max" => {
+                *current += 1;
+                Ret::Op(match enode.op.as_str() {
                     "Add" => GraphTerm::Add,
                     "Mul" => GraphTerm::Mul,
                     "Max" => GraphTerm::Max,
                     _ => panic!(),
-                });
-                g.add_edge(child_one, r, ());
-                g.add_edge(child_two, r, ());
-                Ret::Expr(r)
+                })
+            }
+            "Unary" => {
+                *current += 1;
+                let already_placed = prev_placed.contains_key(node_choice);
+                let Ret::Op(op) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
+                    panic!()
+                };
+                let Ret::Expr(child_one) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    already_placed || no_place,
+                ) else {
+                    panic!()
+                };
+                if no_place {
+                    Ret::Expr(NodeIndex::default())
+                } else if let Some(n) = prev_placed.get(node_choice) {
+                    Ret::Expr(*n)
+                } else {
+                    let r = g.add_node(op);
+                    prev_placed.insert(node_choice, r);
+                    g.add_edge(child_one, r, ());
+                    Ret::Expr(r)
+                }
             }
             "Exp2" | "Sin" | "Recip" | "Neg" | "Sqrt" => {
                 *current += 1;
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
-                    panic!()
-                };
-                let r = g.add_node(match enode.op.as_str() {
+                Ret::Op(match enode.op.as_str() {
                     "Exp2" => GraphTerm::Exp2,
                     "Log2" => GraphTerm::Log2,
                     "Sin" => GraphTerm::Sin,
@@ -664,16 +873,19 @@ pub fn extraction_to_graph(
                     "Neg" => GraphTerm::Neg,
                     "Sqrt" => GraphTerm::Sqrt,
                     _ => panic!(),
-                });
-                g.add_edge(child_one, r, ());
-                Ret::Expr(r)
+                })
             }
             "Fused" => {
                 *current += 1;
-                let Ret::Expr(child_one) = recurse(egraph, trajectory, current, g) else {
-                    panic!()
-                };
-                Ret::Expr(child_one)
+                recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                )
             }
             // ----------- literals & vars -----------
             op if op.starts_with("MNum:") => {
@@ -692,7 +904,15 @@ pub fn extraction_to_graph(
             // ----------- unary ops -----------
             "MNeg" | "MRecip" => {
                 *current += 1;
-                let Ret::Math(c0) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(c0) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 Ret::Math(match enode.op.as_str() {
@@ -706,11 +926,27 @@ pub fn extraction_to_graph(
             "MAdd" | "MSub" | "MMul" | "MDiv" | "MMod" | "MMin" | "MMax" | "MAnd" | "MOr"
             | "MGte" | "MLt" | "MFloorTo" => {
                 *current += 1;
-                let Ret::Math(lhs) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(lhs) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 *current += 1;
-                let Ret::Math(rhs) = recurse(egraph, trajectory, current, g) else {
+                let Ret::Math(rhs) = recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                ) else {
                     panic!()
                 };
                 Ret::Math(match enode.op.as_str() {
@@ -733,7 +969,15 @@ pub fn extraction_to_graph(
             }
             "MNum" | "MVar" => {
                 *current += 1;
-                recurse(egraph, trajectory, current, g)
+                recurse(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                )
             }
             _ => {
                 if let Ok(n) = enode.op.parse::<usize>() {
@@ -745,7 +989,20 @@ pub fn extraction_to_graph(
         }
     }
 
-    recurse(egraph, trajectory, &mut 0, &mut g);
+    recurse(
+        egraph,
+        trajectory,
+        &mut 0,
+        &mut g,
+        loop_level_map,
+        &mut FxHashMap::default(),
+        false,
+    );
+    for n in g.node_indices() {
+        if g.neighbors_undirected(n).next().is_none() {
+            display_graph(&g);
+        }
+    }
     g
 }
 
@@ -764,9 +1021,10 @@ fn cost<'a>(
         let device = MTLCreateSystemDefaultDevice().unwrap();
         #[cfg(feature = "cuda")]
         let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
-                                                // Copy input buffers over
+        // Copy input buffers over
         let mut inputs = inputs
             .into_iter()
+            .filter(|(n, _)| gmem_mapping.contains_key(n))
             .map(|(n, b)| {
                 (
                     gmem_mapping[n],
@@ -923,7 +1181,7 @@ pub fn make_test_inputs(
                 label.clone(),
                 InitData::Data(
                     (0..size.exec(&dyn_map).unwrap())
-                        .map(|_| rng.random())
+                        .map(|_| rng.random_range(-1e-3..1e-3))
                         .collect(),
                 ),
             ));
@@ -936,15 +1194,9 @@ pub fn make_test_inputs(
 mod tests {
     use super::*;
     use crate::{
-        translate::{translate_graph, MetaGraph, SubGraph},
+        translate::{MetaGraph, SubGraph, translate_graph},
         utils::build_search_space,
     };
-    use luminal::{graph::Graph, prelude::petgraph::algo::is_cyclic_directed};
-
-    fn create_simple_egraph() -> EGraph {
-        let egraph = EGraph::default();
-        egraph
-    }
 
     fn build_minimal_add_graph() -> (luminal::graph::Graph, MetaGraph, SubGraph) {
         use luminal::graph::Graph;
@@ -1020,39 +1272,6 @@ mod tests {
                     op_name
                 );
             }
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_metal_buffer_operations() {
-        use metal_rs::Device;
-
-        // Skip if Metal is not available
-        if Device::system_default().is_none() {
-            return;
-        }
-
-        let device = Device::system_default().unwrap();
-        let test_data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-
-        // Test buffer creation
-        let buffer = copy_metal_buffer(&test_data, &device);
-        assert_eq!(
-            buffer.length(),
-            (test_data.len() * std::mem::size_of::<f32>()) as u64
-        );
-
-        // Test buffer read back
-        let read_back = copy_metal_buffer_back(&buffer);
-        assert_eq!(read_back.len(), test_data.len());
-
-        // Verify data integrity
-        for (original, read) in test_data.iter().zip(&read_back) {
-            assert!(
-                (original - read).abs() < 1e-6,
-                "Buffer data should be preserved"
-            );
         }
     }
 

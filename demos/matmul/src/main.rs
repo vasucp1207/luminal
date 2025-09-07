@@ -18,6 +18,7 @@ use luminal_2::{
 use luminal_2::{Buffer, Device};
 #[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+use rand::{rng, Rng};
 use rustc_hash::FxHashMap;
 
 #[cfg(feature = "metal")]
@@ -27,38 +28,33 @@ fn with_autoreleasepool<F: FnOnce()>(f: F) {
 }
 
 #[cfg(feature = "cuda")]
-use std::sync::Arc;
-
-#[cfg(feature = "cuda")]
 #[inline]
 fn with_autoreleasepool<F: FnOnce()>(f: F) {
-    // Non-Apple or no "metal" feature: just run the closure
     f();
 }
 
 fn main() {
     with_autoreleasepool(|| {
-        #[cfg(feature = "cuda")]
-        println!("CUDA MODE ENABLED");
-
         #[cfg(feature = "metal")]
         let arch = GPUArch::Metal(HashMap::default());
         #[cfg(feature = "cuda")]
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N) = (512, 512, 512);
+        let (M, K, N, J) = (512, 512, 512, 512);
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
-        let out = a.matmul(b);
+        let c = cx.named_tensor("C", (K, N));
+        let d = cx.named_tensor("D", (N, J));
+        let _out = (a.matmul(b).swish() * a.matmul(c)).matmul(d);
+
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
         for graph_node in new_graph.node_indices().collect_vec() {
             let graph = new_graph.node_weight_mut(graph_node).unwrap();
             // luminal_2::debug::display_graph(&graph);
             let inputs = make_test_inputs(graph, &cx.dyn_map, &accs);
-
             let searched_graph = search(graph, 3, &inputs, arch.clone(), &cx.dyn_map).unwrap();
             // adjust meta-edges
             let old_output = graph.externals(Direction::Outgoing).next().unwrap();
@@ -110,8 +106,8 @@ fn main() {
                 }
             }
         }
-        let outputs = vec![mapping[&out.id]];
-        let (graph, meta_to_final, outputs) = stitch_meta_graph_together(new_graph, outputs);
+        let (graph, meta_to_final) = stitch_meta_graph_together(new_graph);
+        luminal_2::debug::display_graph(&graph);
         let mut gmem_to_node_mapping = FxHashMap::default();
         for n in graph.node_indices() {
             if let Some(GraphTerm::GMEM { label }) = graph.node_weight(n) {
@@ -120,10 +116,11 @@ fn main() {
         }
         let mut unified_map = FxHashMap::default();
         for (k, v) in mapping {
-            unified_map.insert(k, meta_to_final[&v]);
+            if let Some(m) = meta_to_final.get(&v) {
+                unified_map.insert(k, *m);
+            }
         }
-        let (kernels, gmem_mapping) =
-            codegen(graph.clone(), outputs, arch, 0, &HashMap::default()).unwrap();
+        let (kernels, gmem_mapping) = codegen(graph.clone(), arch, &HashMap::default()).unwrap();
 
         let compiled = compile_kernels(&kernels);
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
@@ -134,26 +131,69 @@ fn main() {
         let device = &CudaContext::new(0).unwrap();
 
         let mut inputs = FxHashMap::default();
+        let mut rng = rng();
         inputs.insert(
             gmem_mapping[&unified_map[&a.id]],
-            (copy_buffer(&vec![1.; M * K], device), false),
+            (
+                copy_buffer(
+                    &(0..M * K)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
         );
         inputs.insert(
             gmem_mapping[&unified_map[&b.id]],
-            (copy_buffer(&vec![1.; K * M], device), false),
+            (
+                copy_buffer(
+                    &(0..K * N)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
+        );
+        inputs.insert(
+            gmem_mapping[&unified_map[&c.id]],
+            (
+                copy_buffer(
+                    &(0..K * N)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
+        );
+        inputs.insert(
+            gmem_mapping[&unified_map[&d.id]],
+            (
+                copy_buffer(
+                    &(0..N * J)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
         );
         for (label, val) in &accs {
             if let Some(node) = gmem_to_node_mapping.get(label) {
-                match val {
-                    InitData::Expr(e) => {
-                        let val = e.exec(&cx.dyn_map).unwrap();
-                        inputs.insert(gmem_mapping[node], {
-                            let v = vec![val as f32];
-                            (copy_buffer(&v, device), true)
-                        });
-                    }
-                    InitData::Data(d) => {
-                        inputs.insert(gmem_mapping[node], (copy_buffer(d, device), true));
+                if let Some(input_index) = gmem_mapping.get(node) {
+                    match val {
+                        InitData::Expr(e) => {
+                            let val = e.exec(&cx.dyn_map).unwrap();
+                            inputs.insert(*input_index, {
+                                let v = vec![val as f32];
+                                (copy_buffer(&v, device), true)
+                            });
+                        }
+                        InitData::Data(d) => {
+                            inputs.insert(*input_index, (copy_buffer(d, device), true));
+                        }
                     }
                 }
             }
@@ -190,7 +230,7 @@ fn main() {
 }
 
 #[cfg(feature = "cuda")]
-pub fn copy_buffer(v: &[f32], ctx: &Arc<CudaContext>) -> CudaSlice<f32> {
+pub fn copy_buffer(v: &[f32], ctx: &std::sync::Arc<CudaContext>) -> CudaSlice<f32> {
     assert!(!v.is_empty(), "Can't copy empty slice to device");
 
     // Then copy host data to the allocated device memory
