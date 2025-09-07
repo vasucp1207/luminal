@@ -11,7 +11,7 @@ Luminal is a deep learning library that uses **search-based compilation** to ach
 To run the demo shown on HN on mac, clone this repo and run:
 ```bash
 cd demos/matmul
-cargo run --release
+cargo run --release --features metal
 ```
 
 > [!IMPORTANT]  
