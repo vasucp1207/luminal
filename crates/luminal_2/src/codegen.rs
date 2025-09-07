@@ -5,6 +5,7 @@ use luminal::{
         petgraph::{
             Directed, Direction,
             algo::toposort,
+            data::DataMapMut,
             prelude::StableGraph,
             unionfind::UnionFind,
             visit::{EdgeRef, NodeIndexable},
@@ -1152,7 +1153,6 @@ fn split_kernels(
             }
         }
     }
-    let orig = marked_graph.clone();
 
     // Split disjoint kernels into unique kernels
     reassign_disjoint_kernels(&mut marked_graph);
@@ -1417,6 +1417,12 @@ fn split_kernels(
 fn reassign_disjoint_kernels(
     g: &mut StableGraph<(GraphTerm, Vec<Expression>, FxHashSet<usize>), (), Directed, u32>,
 ) -> usize {
+    // remove gmem kernel ids
+    for (term, _, kernels) in g.node_weights_mut() {
+        if matches!(term, GraphTerm::GMEM { .. }) {
+            kernels.clear();
+        }
+    }
     // Build i -> nodes and find current max index
     let mut next_idx = 0usize;
     let mut idx_to_nodes: FxHashMap<usize, Vec<NodeIndex<u32>>> = FxHashMap::default();
@@ -1477,6 +1483,17 @@ fn reassign_disjoint_kernels(
                     ws.insert(new_i);
                 }
             }
+        }
+    }
+
+    // re-add kernel ids
+    for i in g.node_indices().collect_vec() {
+        if matches!(g.node_weight(i).unwrap().0, GraphTerm::GMEM { .. }) {
+            g.node_weight_mut(i).unwrap().2 = g
+                .neighbors_directed(i, Direction::Outgoing)
+                .flat_map(|n| g.node_weight(n).unwrap().2.iter())
+                .copied()
+                .collect();
         }
     }
 

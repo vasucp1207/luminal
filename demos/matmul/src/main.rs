@@ -18,6 +18,7 @@ use luminal_2::{
 use luminal_2::{Buffer, Device};
 #[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+use rand::{rng, Rng};
 use rustc_hash::FxHashMap;
 
 #[cfg(feature = "metal")]
@@ -44,8 +45,9 @@ fn main() {
         let mut cx = Graph::new();
         let a = cx.named_tensor("A", (M, K));
         let b = cx.named_tensor("B", (K, N));
-        let c = cx.named_tensor("C", (N, J));
-        let out = a.matmul(b).swish().matmul(c);
+        let c = cx.named_tensor("C", (K, N));
+        let d = cx.named_tensor("D", (N, J));
+        let out = (a.matmul(b).swish() * a.matmul(c)).matmul(d);
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
@@ -130,17 +132,54 @@ fn main() {
         let device = &CudaContext::new(0).unwrap();
 
         let mut inputs = FxHashMap::default();
+        let mut rng = rng();
         inputs.insert(
             gmem_mapping[&unified_map[&a.id]],
-            (copy_buffer(&vec![1.; M * K], device), false),
+            (
+                copy_buffer(
+                    &(0..M * K)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
         );
         inputs.insert(
             gmem_mapping[&unified_map[&b.id]],
-            (copy_buffer(&vec![1.; K * N], device), false),
+            (
+                copy_buffer(
+                    &(0..K * N)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
         );
         inputs.insert(
             gmem_mapping[&unified_map[&c.id]],
-            (copy_buffer(&vec![1.; K * J], device), false),
+            (
+                copy_buffer(
+                    &(0..K * N)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
+        );
+        inputs.insert(
+            gmem_mapping[&unified_map[&d.id]],
+            (
+                copy_buffer(
+                    &(0..N * J)
+                        .map(|_| rng.random_range(-1e-2..1e-2))
+                        .collect_vec(),
+                    device,
+                ),
+                false,
+            ),
         );
         for (label, val) in &accs {
             if let Some(node) = gmem_to_node_mapping.get(label) {

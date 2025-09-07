@@ -1181,7 +1181,7 @@ pub fn make_test_inputs(
                 label.clone(),
                 InitData::Data(
                     (0..size.exec(&dyn_map).unwrap())
-                        .map(|_| rng.random())
+                        .map(|_| rng.random_range(-1e-3..1e-3))
                         .collect(),
                 ),
             ));
