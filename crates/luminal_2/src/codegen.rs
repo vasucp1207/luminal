@@ -1035,10 +1035,7 @@ fn split_kernels(
     )>,
     Vec<(usize, usize)>, // Output kernels
 ) {
-    // display_graph2(&graph, &[]);
-    // Mark level of ops in graph
     let mut marked_graph = StableGraph::new();
-    let mut map = HashMap::<NodeIndex, NodeIndex>::default();
     // Add nodes
     let mut to_remove = vec![];
     for node in graph.node_indices().sorted() {
@@ -1054,8 +1051,7 @@ fn split_kernels(
         for _ in marked_graph.node_count()..node.index() {
             to_remove.push(marked_graph.add_node((GraphTerm::Add, vec![], HashSet::default())));
         }
-        let new_node = marked_graph.add_node((graph[node].clone(), vec![], levels));
-        map.insert(node, new_node);
+        marked_graph.add_node((graph[node].clone(), vec![], levels));
     }
     for n in to_remove {
         marked_graph.remove_node(n);
@@ -1063,7 +1059,7 @@ fn split_kernels(
     // Add edges
     for edge in graph.edge_indices() {
         let (start, end) = graph.edge_endpoints(edge).unwrap();
-        marked_graph.add_edge(map[&start], map[&end], *graph.edge_weight(edge).unwrap());
+        marked_graph.add_edge(start, end, *graph.edge_weight(edge).unwrap());
     }
 
     // Assign loop levels
@@ -1115,7 +1111,6 @@ fn split_kernels(
         dfs.extend(marked_graph.neighbors_undirected(n));
     }
     // Assign kernel numbers
-    let mut n_kernels = 1;
     for node in toposort(&marked_graph, None).unwrap().into_iter().rev() {
         let (term, curr_level, curr_kernel) = marked_graph[node].clone();
         for source in marked_graph
@@ -1123,6 +1118,7 @@ fn split_kernels(
             .collect_vec()
         {
             let (src_term, _, src_kernel) = marked_graph.node_weight_mut(source).unwrap();
+            // TODO: this conditional is gross
             if (matches!(term, GraphTerm::LoopIn { .. })
                 && matches!(src_term, GraphTerm::LoopOut { .. })
                 && curr_level.len() < GRID_DIMS + THREADBLOCK_DIMS)
@@ -1140,44 +1136,31 @@ fn split_kernels(
                         .chain(src_kernel.iter().copied())
                         .max()
                         .unwrap_or(0);
-                    n_kernels = n_kernels.max(max_kernel + 2);
                     src_kernel.clear();
                     src_kernel.insert(max_kernel + 1);
                 }
             } else {
-                for k in &curr_kernel {
-                    if !src_kernel.contains(k) {
-                        src_kernel.insert(*k);
-                    }
-                }
+                src_kernel.extend(curr_kernel.iter().copied());
             }
         }
     }
 
     // Split disjoint kernels into unique kernels
     reassign_disjoint_kernels(&mut marked_graph);
-    // display_multiple_graphs(&[&orig, &marked_graph]);
 
-    n_kernels = *marked_graph
-        .node_weights()
-        .flat_map(|(_, _, k)| k.iter())
-        .max()
-        .expect("No kernels found!?")
-        + 1;
     // Remove holes in the kernel index count (0, 1, 3, 4) -> (0, 1, 2, 3)
-    for kernel in (0..n_kernels).rev() {
-        if marked_graph
-            .node_weights()
-            .all(|(_, _, k)| !k.contains(&kernel))
-        {
-            for (_, _, kernels) in marked_graph.node_weights_mut() {
-                *kernels = kernels
-                    .drain()
-                    .map(|k| if k > kernel { k - 1 } else { k })
-                    .collect();
-            }
-        }
+    let remap: FxHashMap<usize, usize> = marked_graph
+        .node_weights()
+        .flat_map(|(_, _, k)| k.iter().copied())
+        .sorted_unstable()
+        .dedup()
+        .enumerate()
+        .map(|(i, k)| (k, i))
+        .collect();
+    for (_, _, ks) in marked_graph.node_weights_mut() {
+        *ks = ks.drain().map(|k| remap[&k]).collect();
     }
+
     // Add kernel barriers
     for edge in marked_graph.edge_indices().collect_vec() {
         let (mut src, mut dest) = marked_graph.edge_endpoints(edge).unwrap();
@@ -1231,12 +1214,11 @@ fn split_kernels(
     }
 
     // Place nodes in kernel graphs
-    n_kernels = *marked_graph
+    let n_kernels = 1 + *marked_graph
         .node_weights()
-        .flat_map(|(_, _, k)| k.iter())
+        .flat_map(|(_, _, k)| k)
         .max()
-        .expect("No kernels found!?")
-        + 1;
+        .expect("No kernels found!?");
     let mut kernel_graphs = (0..n_kernels)
         .map(|_| (StableGraph::new(), vec![], vec![], vec![]))
         .collect_vec();
@@ -1414,9 +1396,10 @@ fn split_kernels(
     )
 }
 
+/// if we have multiple disjoint sets of terms, they need different kernel indexes
 fn reassign_disjoint_kernels(
-    g: &mut StableGraph<(GraphTerm, Vec<Expression>, FxHashSet<usize>), (), Directed, u32>,
-) -> usize {
+    g: &mut StableGraph<(GraphTerm, Vec<Expression>, FxHashSet<usize>), ()>,
+) {
     // remove gmem kernel ids
     for (term, _, kernels) in g.node_weights_mut() {
         if matches!(term, GraphTerm::GMEM { .. }) {
@@ -1424,17 +1407,11 @@ fn reassign_disjoint_kernels(
         }
     }
     // Build i -> nodes and find current max index
-    let mut next_idx = 0usize;
-    let mut idx_to_nodes: FxHashMap<usize, Vec<NodeIndex<u32>>> = FxHashMap::default();
-    for n in g.node_indices() {
-        let ws = &g[n].2;
-        for &i in ws {
-            idx_to_nodes.entry(i).or_default().push(n);
-            if i > next_idx {
-                next_idx = i;
-            }
-        }
-    }
+    let next_kernel_idx = *g.node_weights().flat_map(|(_, _, k)| k).max().unwrap_or(&0);
+    let idx_to_nodes = g
+        .node_indices()
+        .flat_map(|n| g[n].2.iter().copied().map(move |i| (i, n)))
+        .into_group_map();
 
     // For each i, find connected components in the subgraph induced by nodes containing i
     for (i, nodes) in idx_to_nodes {
@@ -1442,45 +1419,36 @@ fn reassign_disjoint_kernels(
             continue;
         }
 
-        let with_i: FxHashSet<_> = nodes.iter().copied().collect();
-        let mut visited: FxHashSet<NodeIndex<u32>> = FxHashSet::default();
-        let mut comps: Vec<Vec<NodeIndex<u32>>> = Vec::new();
-
-        for &start in &nodes {
-            if visited.contains(&start) {
-                continue;
+        // Union-Find over only edges inside the induced subgraph
+        let mut uf = UnionFind::new(g.node_bound());
+        for e in g.edge_indices() {
+            let (u, v) = g.edge_endpoints(e).unwrap();
+            if nodes.contains(&u) && nodes.contains(&v) {
+                uf.union(u.index(), v.index());
             }
-            let mut q = VecDeque::new();
-            let mut comp = Vec::new();
-            visited.insert(start);
-            q.push_back(start);
-
-            while let Some(n) = q.pop_front() {
-                comp.push(n);
-                // weak connectivity inside the induced subgraph
-                for m in g.neighbors_undirected(n) {
-                    if with_i.contains(&m) && !visited.contains(&m) {
-                        visited.insert(m);
-                        q.push_back(m);
-                    }
-                }
-            }
-            comps.push(comp);
         }
 
+        // Collect components
+        let comps = nodes
+            .iter()
+            .map(|n| (uf.find(n.index()), *n))
+            .into_group_map();
         if comps.len() <= 1 {
             continue;
         }
 
-        // Keep the largest component's i; rename i in the others
-        comps.sort_by_key(|c| std::cmp::Reverse(c.len()));
-        for comp in comps.into_iter().skip(1) {
-            next_idx += 1;
-            let new_i = next_idx;
+        // Keep largest; rename `i` in others
+        for (n_group, comp) in comps
+            .into_values()
+            .sorted_by_key(|c| c.len())
+            .rev()
+            .skip(1)
+            .enumerate()
+        {
             for n in comp {
                 let ws = &mut g.node_weight_mut(n).unwrap().2;
                 if ws.remove(&i) {
-                    ws.insert(new_i);
+                    ws.insert(next_kernel_idx + n_group + 1);
                 }
             }
         }
@@ -1488,16 +1456,14 @@ fn reassign_disjoint_kernels(
 
     // re-add kernel ids
     for i in g.node_indices().collect_vec() {
-        if matches!(g.node_weight(i).unwrap().0, GraphTerm::GMEM { .. }) {
+        if matches!(g[i].0, GraphTerm::GMEM { .. }) {
             g.node_weight_mut(i).unwrap().2 = g
                 .neighbors_directed(i, Direction::Outgoing)
-                .flat_map(|n| g.node_weight(n).unwrap().2.iter())
+                .flat_map(|n| &g[n].2)
                 .copied()
                 .collect();
         }
     }
-
-    next_idx
 }
 
 pub fn stitch_meta_graph_together(
