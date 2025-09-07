@@ -47,7 +47,7 @@ fn main() {
         let b = cx.named_tensor("B", (K, N));
         let c = cx.named_tensor("C", (K, N));
         let d = cx.named_tensor("D", (N, J));
-        let out = (a.matmul(b).swish() * a.matmul(c)).matmul(d);
+        let _out = (a.matmul(b).swish() * a.matmul(c)).matmul(d);
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
@@ -106,8 +106,7 @@ fn main() {
                 }
             }
         }
-        let outputs = vec![mapping[&out.id]];
-        let (graph, meta_to_final, outputs) = stitch_meta_graph_together(new_graph, outputs);
+        let (graph, meta_to_final) = stitch_meta_graph_together(new_graph);
         luminal_2::debug::display_graph(&graph);
         let mut gmem_to_node_mapping = FxHashMap::default();
         for n in graph.node_indices() {
@@ -121,7 +120,7 @@ fn main() {
                 unified_map.insert(k, *m);
             }
         }
-        let (kernels, gmem_mapping) = codegen(graph.clone(), arch, 0, &HashMap::default()).unwrap();
+        let (kernels, gmem_mapping) = codegen(graph.clone(), arch, &HashMap::default()).unwrap();
 
         let compiled = compile_kernels(&kernels);
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);

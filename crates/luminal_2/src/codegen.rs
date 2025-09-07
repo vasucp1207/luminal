@@ -5,7 +5,6 @@ use luminal::{
         petgraph::{
             Directed, Direction,
             algo::toposort,
-            data::DataMapMut,
             prelude::StableGraph,
             unionfind::UnionFind,
             visit::{EdgeRef, NodeIndexable},
@@ -15,13 +14,13 @@ use luminal::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet},
     iter::repeat,
 };
 
 use crate::{
     GMEMBuffer, GPUArch, GraphTerm, Kernel,
-    debug::{display_graph, display_graph2, display_multiple_graphs},
+    debug::{display_graph, display_graph2},
     translate::{MetaGraph, SubGraph},
     utils::validate_graph,
 };
@@ -35,7 +34,6 @@ pub const MAX_GRID_YZ: usize = 65535;
 pub fn codegen(
     mut graph: StableGraph<GraphTerm, (), Directed>,
     mut arch: GPUArch,
-    n_graph: usize,
     dyn_vars: &FxHashMap<char, usize>,
 ) -> Option<(
     StableGraph<Kernel, (usize, usize), Directed>,
@@ -53,10 +51,7 @@ pub fn codegen(
             graph.remove_node(node);
         }
     }
-    let (kernels, output_kernels) = split_kernels(graph.clone(), n_graph);
-    // if kernels.len() == 1 {
-    //     panic!();
-    // }
+    let (kernels, output_kernels) = split_kernels(graph.clone());
     // Create kernel meta graph to toposort
     let mut kernel_meta_graph = StableGraph::new();
     for _ in 0..kernels.len() {
@@ -295,8 +290,6 @@ pub fn codegen(
                         ", threadgroup float* sm [[threadgroup(0)]]".to_string(),
                     )
                 };
-                // println!("is this getting reached?");
-
                 format!(
                     "#include <metal_stdlib>
 using namespace metal;
@@ -795,8 +788,9 @@ fn make_kernel(
                     }
                 }
             }
-            GraphTerm::LoopOut { range, stride, .. } => {
-                panic!("found loopout range: {range} stride: {stride}")
+            GraphTerm::LoopOut { .. } => {
+                return None; // TODO: why do we ever see this? should be able to panic here.
+                // panic!("found loopout range: {range} stride: {stride}")
             }
             GraphTerm::Custom(_) | GraphTerm::Diff(_) | GraphTerm::Break => {
                 unreachable!("this should be handled directly in codegen!")
@@ -1025,7 +1019,6 @@ fn toposort_subset<N, E>(
 /// add kernel dimensions so that all loop-to-loop dependencies are between seperate kernels or on the threadblock / thread levels
 fn split_kernels(
     graph: StableGraph<GraphTerm, (), Directed>,
-    _n_graph: usize,
 ) -> (
     Vec<(
         StableGraph<(GraphTerm, usize), (), Directed>,
@@ -1085,7 +1078,6 @@ fn split_kernels(
             }
             if matches!(curr_term, GraphTerm::LoopIn { .. }) {
                 if neighbor_levels.is_empty() {
-                    // display_graph2(&graph, &[]);
                     display_graph2(&marked_graph, &[]);
                 }
                 neighbor_levels.pop().unwrap();
@@ -1172,12 +1164,10 @@ fn split_kernels(
             let mut curr = src;
             let mut total_size = Expression::from(0);
             loop {
-                match marked_graph[curr].0 {
-                    GraphTerm::LoopOut { range, stride, .. } => {
-                        total_size = total_size.max(stride.substitute('z', range));
-                    }
-                    _ => break,
-                }
+                let GraphTerm::LoopOut { range, stride, .. } = marked_graph[curr].0 else {
+                    break;
+                };
+                total_size = total_size.max(stride.substitute('z', range));
                 curr = marked_graph
                     .neighbors_directed(curr, Direction::Incoming)
                     .next()
@@ -1468,12 +1458,7 @@ fn reassign_disjoint_kernels(
 
 pub fn stitch_meta_graph_together(
     meta_graph: MetaGraph,
-    outputs: Vec<(NodeIndex, NodeIndex)>,
-) -> (
-    SubGraph,
-    FxHashMap<(NodeIndex, NodeIndex), NodeIndex>,
-    Vec<NodeIndex>,
-) {
+) -> (SubGraph, FxHashMap<(NodeIndex, NodeIndex), NodeIndex>) {
     let mut out = SubGraph::new();
 
     // (meta_node, inner_node) -> stitched node (no entry for break_in placeholders)
@@ -1502,8 +1487,6 @@ pub fn stitch_meta_graph_together(
             }
         }
     }
-    // translate outputs
-    let new_outputs = outputs.into_iter().map(|k| map[&k]).collect();
 
     // 2) copy inner edges (skip edges touching placeholders; record placeholder -> target)
     for m in meta_graph.node_indices() {
@@ -1547,7 +1530,7 @@ pub fn stitch_meta_graph_together(
         }
     }
 
-    (out, map, new_outputs)
+    (out, map)
 }
 
 #[cfg(test)]
@@ -1625,10 +1608,8 @@ mod tests {
     fn test_stitch_kernel_meta_graph_empty() {
         let kernel_meta_graph: StableGraph<SubGraph, (NodeIndex, NodeIndex), Directed> =
             StableGraph::new();
-        let outputs = vec![];
-        let (stitched, map, new_outputs) = stitch_meta_graph_together(kernel_meta_graph, outputs);
+        let (stitched, map) = stitch_meta_graph_together(kernel_meta_graph);
         assert_eq!(stitched.node_count(), 0);
         assert!(map.is_empty());
-        assert!(new_outputs.is_empty());
     }
 }

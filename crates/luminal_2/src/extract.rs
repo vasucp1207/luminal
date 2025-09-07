@@ -378,7 +378,7 @@ pub fn search(
             .collect();
 
         let Some((kernels, gmem_mapping)) =
-            crate::codegen::codegen(graph.clone(), arch.clone(), 0, dyn_vars)
+            crate::codegen::codegen(graph.clone(), arch.clone(), dyn_vars)
         else {
             continue;
         };

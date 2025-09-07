@@ -1,11 +1,5 @@
 #[cfg(feature = "metal")]
-use crate::{Buffer, Device, Function};
-use crate::{
-    GPUArch, GraphTerm,
-    codegen::{codegen, stitch_meta_graph_together},
-    extract::{make_test_inputs, search},
-    translate::{InitData, OptimalGraphNodeIndex, SubGraphNodeIndex, translate_graph},
-};
+use crate::{Buffer, Device, Function, GraphTerm};
 #[cfg(feature = "cuda")]
 use cudarc::{driver::*, nvrtc::CompileOptions};
 use itertools::Itertools;
@@ -16,7 +10,7 @@ use std::io::Write;
 
 use luminal::{
     prelude::{
-        Graph, GraphTensor, NodeIndex,
+        NodeIndex,
         petgraph::{
             Direction,
             algo::toposort,
@@ -29,155 +23,10 @@ use luminal::{
 #[cfg(feature = "metal")]
 use objc2_metal::{MTLBuffer, MTLDevice};
 use rustc_hash::FxHashMap;
-use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
+use std::{ffi::c_void, ptr::NonNull};
 use std::{fs::File, io::Read};
 
 use crate::Kernel;
-
-#[cfg(feature = "metal")]
-pub fn chunk_based_search_compiler(
-    original_graph: Graph,
-    original_graph_input: Vec<(GraphTensor, Vec<f32>)>,
-    original_graph_output: &GraphTensor,
-    inits: &[(String, InitData)],
-) -> Vec<f32> {
-    use objc2::rc::autoreleasepool;
-
-    autoreleasepool(|_| {
-        use objc2_metal::MTLCreateSystemDefaultDevice;
-
-        let (mut meta_graph, mut global_map, buffers) = translate_graph(&original_graph);
-        // Search each subgraph
-        for graph_node in meta_graph.node_indices().collect_vec() {
-            let sub_graph = meta_graph.node_weight_mut(graph_node).unwrap();
-            // luminal_2::utils::display_graph(&graph, &[]);
-            let inputs = make_test_inputs(sub_graph, &original_graph.dyn_map, inits);
-            let best_searched_graph = search(
-                &sub_graph,
-                7,
-                &inputs,
-                GPUArch::Metal(HashMap::default()),
-                &original_graph.dyn_map,
-            )
-            .unwrap();
-
-            // !! screw it just say that the new only output of this graph is the only output (this doesn't work with multiple outputs)
-            // adjust meta-edges
-            let old_output: SubGraphNodeIndex =
-                sub_graph.externals(Direction::Outgoing).next().unwrap();
-            let new_output: OptimalGraphNodeIndex = best_searched_graph
-                .externals(Direction::Outgoing)
-                .next()
-                .unwrap();
-
-            let old_inputs: HashMap<SubGraphNodeIndex, String> = sub_graph // we could improve this with a better global_map
-                .node_indices()
-                .filter_map(|n| {
-                    if let GraphTerm::GMEM { label } = sub_graph.node_weight(n).unwrap() {
-                        Some((n, label.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<HashMap<_, _>>();
-            let new_inputs: HashMap<String, OptimalGraphNodeIndex> = best_searched_graph
-                .node_indices()
-                .filter_map(|n| {
-                    if let GraphTerm::GMEM { label } = best_searched_graph.node_weight(n).unwrap() {
-                        Some((label.clone(), n))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<HashMap<_, _>>();
-            *sub_graph = best_searched_graph;
-            for edge in meta_graph
-                .edges_directed(graph_node, Direction::Outgoing)
-                .map(|e| e.id())
-                .collect_vec()
-            {
-                let (input, _) = meta_graph.edge_weight_mut(edge).unwrap();
-                *input = new_output;
-            }
-            // Update old-to-new-mappings
-            for (_, (meta, v)) in &mut global_map {
-                if *meta != graph_node {
-                    continue;
-                }
-                if *v == old_output {
-                    *v = new_output;
-                }
-                if let Some(gmem_label) = old_inputs.get(v) {
-                    *v = new_inputs[gmem_label];
-                }
-            }
-        }
-
-        let outputs = vec![global_map[&original_graph_output.id]];
-        let (new_graph, meta_to_unified, outputs) = stitch_meta_graph_together(meta_graph, outputs);
-        let mut new_old_to_new_mapping = FxHashMap::default();
-        for (k, v) in global_map {
-            new_old_to_new_mapping.insert(k, meta_to_unified[&v]);
-        }
-        // luminal_2::utils::display_graph(&new_graph, &[]);
-        let (kernels, gmem_mapping) = codegen(
-            new_graph.clone(),
-            GPUArch::Metal(HashMap::default()),
-            0,
-            &original_graph.dyn_map,
-        )
-        .unwrap();
-
-        let device = MTLCreateSystemDefaultDevice().unwrap();
-        let mut inputs = FxHashMap::default();
-
-        for (input, data) in original_graph_input {
-            inputs.insert(
-                gmem_mapping[&new_old_to_new_mapping[&input.id]],
-                (copy_metal_buffer(&data, &device), true),
-            );
-        }
-        let mut gmem_to_node_mapping = FxHashMap::default();
-        for n in new_graph.node_indices() {
-            if let Some(GraphTerm::GMEM { label }) = new_graph.node_weight(n) {
-                gmem_to_node_mapping.insert(label, n);
-            }
-        }
-
-        for (label, val) in &buffers {
-            match val {
-                InitData::Expr(e) => {
-                    let val = e.exec(&original_graph.dyn_map).unwrap();
-                    inputs.insert(
-                        gmem_mapping[&new_old_to_new_mapping[&gmem_to_node_mapping[label]]],
-                        {
-                            let v = vec![val as f32];
-                            (copy_metal_buffer(&v, &device), true)
-                        },
-                    );
-                }
-                InitData::Data(d) => {
-                    inputs.insert(
-                        gmem_mapping[&new_old_to_new_mapping[&gmem_to_node_mapping[label]]],
-                        (copy_metal_buffer(d, &device), true),
-                    );
-                }
-            }
-        }
-        let compiled_kernels = compile_kernels(&kernels);
-        let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
-        let (outputs, _) = run_graph(
-            &StableGraph::default(),
-            &mut inputs,
-            &kernels,
-            &original_graph.dyn_map,
-            &compiled_kernels,
-            &int_buffers,
-            &int_buffer_map,
-        );
-        copy_metal_buffer_back(&outputs[0])
-    })
-}
 
 pub fn assign_buffers(
     graph: &StableGraph<Kernel, (usize, usize)>,

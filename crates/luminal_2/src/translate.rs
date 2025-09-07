@@ -586,7 +586,7 @@ mod tests {
         let a = cx.tensor(3).set([1., 4., 9.]);
         let _b = a.sqrt().retrieve();
 
-        let (meta_graph, global_map, _inits) = translate_graph(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         // Find the sqrt operation in the translated graph
         let mut found_sqrt = false;
@@ -881,7 +881,7 @@ mod tests {
         let a = cx.constant(5.0);
         let _b = a.retrieve();
 
-        let (meta_graph, global_map, inits) = translate_graph(&cx);
+        let (meta_graph, _global_map, inits) = translate_graph(&cx);
 
         // Constants should be translated to GMEM nodes with appropriate init data
         let mut found_constant_gmem = false;
@@ -913,10 +913,10 @@ mod tests {
         let a = cx.tensor(3).set([1., 2., 3.]);
         let b = cx.tensor(3).set([1., 2., 3.]);
         let c = (a + b).graph_break();
-        let d = c * 10.0;
+        let _d = c * 10.0;
         cx.execute_debug();
 
-        let (meta_graph, global_map, _inits) = translate_graph(&cx);
+        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
 
         // Graph break should create multiple meta nodes
         assert!(
